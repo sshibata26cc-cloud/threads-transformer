@@ -1,6 +1,12 @@
 import streamlit as st
 
-from story_image import StoryImageError, generate_story_image
+from story_image import (
+    DEFAULT_MAX_FONT_SIZE,
+    DEFAULT_TEXT_COLOR,
+    StoryImageError,
+    generate_story_image,
+    load_background_image,
+)
 from styles import inject_custom_css
 from threads_api import (
     ThreadsAPIError,
@@ -40,6 +46,15 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+if "result" not in st.session_state:
+    st.session_state.result = None
+if "story_image_bytes" not in st.session_state:
+    st.session_state.story_image_bytes = None
+if "story_warning" not in st.session_state:
+    st.session_state.story_warning = None
+if "design_reset_id" not in st.session_state:
+    st.session_state.design_reset_id = 0
 
 st.markdown('<div class="tt-step-title">1. Threadsアカウントを選択</div>', unsafe_allow_html=True)
 with st.container(border=True):
@@ -100,60 +115,150 @@ if convert_clicked:
                         )
 
                 if not post_summary:
+                    st.session_state.result = None
                     st.error(
                         "選択したアカウントの投稿として確認できませんでした。"
                         "アカウントの選択とThreadsリンクをご確認ください。"
                     )
                 else:
                     st.success("Threadsから投稿情報を取得しました。")
+
+                    account_name = post.get("username", selected_account)
+                    profile_image_url = (profile or {}).get("threads_profile_picture_url")
+                    original_text = post.get("text", "")
                     reply_texts = [r.get("text", "") for r in own_replies]
+
+                    st.session_state.result = {
+                        "mode": mode,
+                        "account_name": account_name,
+                        "profile_image_url": profile_image_url,
+                        "original_text": original_text,
+                        "reply_texts": reply_texts,
+                    }
+                    st.session_state.design_reset_id += 1
 
                     if mode == MODE_INSTAGRAM:
                         try:
-                            with st.spinner("ストーリーズ画像を生成しています..."):
-                                image_bytes, warning = generate_story_image(
-                                    profile_image_url=(profile or {}).get(
-                                        "threads_profile_picture_url"
-                                    ),
-                                    account_name=post.get("username", selected_account),
-                                    original_text=post.get("text", ""),
-                                    own_replies=reply_texts,
-                                )
+                            image_bytes, warning = generate_story_image(
+                                profile_image_url=profile_image_url,
+                                account_name=account_name,
+                                original_text=original_text,
+                                own_replies=reply_texts,
+                            )
                         except StoryImageError as e:
+                            st.session_state.story_image_bytes = None
+                            st.session_state.story_warning = None
                             st.error(e.friendly_message)
                             with st.expander("デバッグ情報（エラー詳細）"):
                                 st.write(e.detail or "詳細情報はありません。")
                         else:
-                            if warning:
-                                st.warning(warning)
-                            st.markdown(
-                                '<div class="tt-step-title">生成されたストーリーズ画像</div>',
-                                unsafe_allow_html=True,
-                            )
-                            st.image(image_bytes, use_container_width=True)
-                            st.download_button(
-                                "PNGをダウンロード",
-                                data=image_bytes,
-                                file_name="threads_story.png",
-                                mime="image/png",
-                                use_container_width=True,
-                            )
-
-                    else:  # MODE_NOTE
-                        note_text = "\n\n".join([post.get("text", "")] + reply_texts)
-                        st.markdown(
-                            '<div class="tt-step-title">note投稿用テキスト</div>',
-                            unsafe_allow_html=True,
-                        )
-                        st.text_area(
-                            "コピーしてお使いください（自由に編集できます）",
-                            value=note_text,
-                            height=600,
-                            label_visibility="collapsed",
+                            st.session_state.story_image_bytes = image_bytes
+                            st.session_state.story_warning = warning
+                    else:
+                        st.session_state.note_text = "\n\n".join(
+                            [original_text] + reply_texts
                         )
 
             except ThreadsAPIError as e:
+                st.session_state.result = None
                 st.error(e.friendly_message)
                 with st.expander("デバッグ情報（エラー詳細）"):
                     st.write(f"HTTPステータスコード: {e.status_code}")
                     st.code(e.response_text or "（応答本文なし）")
+
+# ここから下は、変換ボタンを押したときだけでなく、
+# デザイン設定を変更したときの再実行でも表示され続けるようにする。
+result = st.session_state.result
+
+if result and result["mode"] == MODE_INSTAGRAM:
+    st.markdown('<div class="tt-step-title">ストーリーズデザイン</div>', unsafe_allow_html=True)
+    with st.container(border=True):
+        reset_id = st.session_state.design_reset_id
+
+        bg_file = st.file_uploader(
+            "背景画像を選択（未指定の場合は白背景を使用します）",
+            type=["png", "jpg", "jpeg", "webp"],
+            key=f"story_bg_{reset_id}",
+        )
+        overlay_percent = st.slider(
+            "背景の暗さ",
+            min_value=0,
+            max_value=80,
+            value=20,
+            step=5,
+            format="%d%%",
+            key=f"story_overlay_{reset_id}",
+        )
+        text_color = st.color_picker(
+            "文字色",
+            value=DEFAULT_TEXT_COLOR,
+            key=f"story_color_{reset_id}",
+        )
+        font_size = st.slider(
+            "文字サイズ",
+            min_value=20,
+            max_value=64,
+            value=DEFAULT_MAX_FONT_SIZE,
+            key=f"story_font_{reset_id}",
+        )
+        preview_clicked = st.button(
+            "プレビューを更新",
+            key=f"story_preview_btn_{reset_id}",
+            use_container_width=True,
+        )
+
+    if preview_clicked:
+        background_image = None
+        bg_load_failed = False
+
+        if bg_file is not None:
+            try:
+                background_image = load_background_image(bg_file.getvalue())
+            except StoryImageError as e:
+                bg_load_failed = True
+                st.error(e.friendly_message)
+                with st.expander("デバッグ情報（エラー詳細）"):
+                    st.write(e.detail or "詳細情報はありません。")
+
+        if not bg_load_failed:
+            try:
+                with st.spinner("プレビューを生成しています..."):
+                    image_bytes, warning = generate_story_image(
+                        profile_image_url=result["profile_image_url"],
+                        account_name=result["account_name"],
+                        original_text=result["original_text"],
+                        own_replies=result["reply_texts"],
+                        background_image=background_image,
+                        text_color=text_color,
+                        max_font_size=font_size,
+                        overlay_opacity=overlay_percent / 100,
+                    )
+            except StoryImageError as e:
+                st.error(e.friendly_message)
+                with st.expander("デバッグ情報（エラー詳細）"):
+                    st.write(e.detail or "詳細情報はありません。")
+            else:
+                st.session_state.story_image_bytes = image_bytes
+                st.session_state.story_warning = warning
+
+    if st.session_state.story_image_bytes:
+        if st.session_state.story_warning:
+            st.warning(st.session_state.story_warning)
+        st.markdown('<div class="tt-step-title">プレビュー</div>', unsafe_allow_html=True)
+        st.image(st.session_state.story_image_bytes, use_container_width=True)
+        st.download_button(
+            "PNGをダウンロード",
+            data=st.session_state.story_image_bytes,
+            file_name="threads_story.png",
+            mime="image/png",
+            use_container_width=True,
+        )
+
+elif result and result["mode"] == MODE_NOTE:
+    st.markdown('<div class="tt-step-title">note投稿用テキスト</div>', unsafe_allow_html=True)
+    st.text_area(
+        "コピーしてお使いください（自由に編集できます）",
+        height=600,
+        key="note_text",
+        label_visibility="collapsed",
+    )
