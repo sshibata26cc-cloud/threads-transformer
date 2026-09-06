@@ -1,5 +1,6 @@
 import streamlit as st
 
+from app_meta import inject_mobile_meta_tags, resolve_page_icon
 from story_image import (
     DEFAULT_MAX_FONT_SIZE,
     DEFAULT_TEXT_COLOR,
@@ -26,12 +27,13 @@ MODE_NOTE = "note 投稿用"
 ACCOUNT_CHOICES = ["shin.coaching", "takuma_o369", "masa_life128"]
 
 st.set_page_config(
-    page_title="Threads Transformer",
-    page_icon="🧵",
+    page_title="Threads XC",
+    page_icon=resolve_page_icon(),
     layout="centered",
 )
 
 inject_custom_css()
+inject_mobile_meta_tags()
 
 st.markdown(
     """
