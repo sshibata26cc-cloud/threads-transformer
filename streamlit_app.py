@@ -3,7 +3,12 @@ import hashlib
 import streamlit as st
 
 from app_meta import inject_mobile_meta_tags, resolve_page_icon
-from cloudinary_storage import CloudinaryError, delete_story_image, upload_story_image
+from cloudinary_storage import (
+    CloudinaryError,
+    delete_story_image,
+    upload_story_image,
+    verify_image_url,
+)
 from instagram_api import InstagramAPIError, get_instagram_credentials, post_story
 from story_image import (
     DEFAULT_MAX_FONT_SIZE,
@@ -70,6 +75,8 @@ if "ig_post_success_message" not in st.session_state:
     st.session_state.ig_post_success_message = None
 if "ig_post_error" not in st.session_state:
     st.session_state.ig_post_error = None
+if "ig_post_debug_info" not in st.session_state:
+    st.session_state.ig_post_debug_info = None
 
 st.markdown('<div class="tt-step-title">1. Threadsアカウントを選択</div>', unsafe_allow_html=True)
 with st.container(border=True):
@@ -286,6 +293,24 @@ if result and result["mode"] == MODE_INSTAGRAM:
                 st.write(ig_error["detail"] or "詳細情報はありません。")
             st.session_state.ig_post_error = None
 
+        if st.session_state.ig_post_debug_info:
+            debug_info = st.session_state.ig_post_debug_info
+            with st.expander("デバッグ情報（投稿処理の詳細）"):
+                st.write("Cloudinaryの公開URL:", debug_info.get("cloudinary_url"))
+                verify_result = debug_info.get("verify_result")
+                if verify_result:
+                    st.write(
+                        "画像取得テスト:",
+                        f"HTTPステータス {verify_result['status_code']} / "
+                        f"Content-Type {verify_result['content_type']} / "
+                        f"{verify_result['byte_count']}バイト",
+                    )
+                for entry in debug_info.get("instagram_trace", []):
+                    st.write(f"Instagram API - {entry['step']}:")
+                    st.write(f"HTTPステータス: {entry['status_code']}")
+                    st.code(entry["response_text"] or "（応答本文なし）")
+            st.session_state.ig_post_debug_info = None
+
         post_clicked = st.button(
             "ストーリーズ投稿",
             key="ig_post_button",
@@ -325,14 +350,28 @@ if result and result["mode"] == MODE_INSTAGRAM:
 
                 if ig_confirm_clicked:
                     st.session_state.ig_post_confirm_pending = False
+                    debug_info = {
+                        "cloudinary_url": None,
+                        "verify_result": None,
+                        "instagram_trace": [],
+                    }
+                    ig_trace = debug_info["instagram_trace"]
                     try:
                         with st.spinner("Instagramへ投稿しています..."):
                             jpeg_bytes = convert_png_to_jpeg(current_image_bytes)
                             image_url, public_id = upload_story_image(jpeg_bytes)
+                            debug_info["cloudinary_url"] = image_url
+
+                            # Instagramに渡す前に、公開URLが実際に取得できる
+                            # 正常なJPEGになっているかを確認する（CDN反映待ちを考慮）。
+                            verify_result = verify_image_url(image_url)
+                            debug_info["verify_result"] = verify_result
+
                             post_story(
                                 ig_credentials["ig_user_id"],
                                 ig_credentials["access_token"],
                                 image_url,
+                                trace=ig_trace,
                             )
                     except CloudinaryError as e:
                         st.session_state.ig_post_error = {
@@ -350,13 +389,15 @@ if result and result["mode"] == MODE_INSTAGRAM:
                             "detail": str(e),
                         }
                     else:
-                        # Instagramへの投稿が成功した後にCloudinaryの一時画像を削除する。
-                        # 削除に失敗しても、投稿自体は成功として扱う。
+                        # Instagram側でのメディアコンテナ作成・公開がすべて成功した後にのみ、
+                        # Cloudinaryの一時画像を削除する。削除に失敗しても投稿自体は成功として扱う。
                         delete_story_image(public_id)
                         st.session_state.last_posted_image_hash = current_image_hash
                         st.session_state.ig_post_success_message = (
                             "Instagramストーリーズへの投稿が完了しました。"
                         )
+                    finally:
+                        st.session_state.ig_post_debug_info = debug_info
 
                     # 確認ダイアログを画面から消し、結果メッセージだけを
                     # きれいに表示し直すために再実行する。

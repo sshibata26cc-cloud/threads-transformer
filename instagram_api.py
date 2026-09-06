@@ -70,6 +70,24 @@ def _status_to_friendly_message(status_code: int) -> str:
     return "Instagramへの投稿に失敗しました。時間をおいて再度お試しください。"
 
 
+def _record_trace(trace, step, response):
+    """
+    デバッグ用に、Instagram APIへのリクエスト結果（ステップ名・HTTPステータス・
+    応答本文）を記録する。traceがNoneの場合は何もしない。
+
+    アクセストークンなどのリクエストパラメータ自体は記録しない。
+    """
+    if trace is None:
+        return
+    trace.append(
+        {
+            "step": step,
+            "status_code": response.status_code,
+            "response_text": response.text,
+        }
+    )
+
+
 def _parse_response(response):
     """
     レスポンスをJSONとして解釈する。エラー時はInstagramAPIErrorに変換する。
@@ -91,7 +109,7 @@ def _parse_response(response):
         )
 
 
-def _request(method, url, params):
+def _request(method, url, params, trace=None, step=""):
     try:
         response = requests.request(method, url, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
     except requests.exceptions.RequestException as e:
@@ -99,21 +117,29 @@ def _request(method, url, params):
             "Instagramへの投稿に失敗しました。時間をおいて再度お試しください。",
             detail=str(e),
         )
+    _record_trace(trace, step, response)
     return _parse_response(response)
 
 
-def create_story_container(ig_user_id: str, access_token: str, image_url: str) -> str:
+def create_story_container(
+    ig_user_id: str, access_token: str, image_url: str, trace=None
+) -> str:
     """
     公開URLの画像から、Story投稿用のメディアコンテナを作成し、
     コンテナID（creation_id）を返す。
+
+    image_urlは前後の空白を取り除いてから使用する
+    （余計な文字が連結されたまま送られることを防ぐため）。
     """
+    image_url = (image_url or "").strip()
+
     url = f"{API_BASE}/{ig_user_id}/media"
     params = {
         "image_url": image_url,
         "media_type": "STORIES",
         "access_token": access_token,
     }
-    data = _request("POST", url, params)
+    data = _request("POST", url, params, trace=trace, step="メディアコンテナ作成 (media)")
 
     container_id = data.get("id")
     if not container_id:
@@ -124,7 +150,7 @@ def create_story_container(ig_user_id: str, access_token: str, image_url: str) -
     return container_id
 
 
-def wait_until_container_ready(container_id: str, access_token: str) -> None:
+def wait_until_container_ready(container_id: str, access_token: str, trace=None) -> None:
     """
     メディアコンテナの処理状況（status_code）を確認し、
     FINISHEDになるまで待つ。
@@ -138,7 +164,7 @@ def wait_until_container_ready(container_id: str, access_token: str) -> None:
 
     waited_seconds = 0
     while True:
-        data = _request("GET", url, params)
+        data = _request("GET", url, params, trace=trace, step="コンテナ状態確認 (status_code)")
         status_code = data.get("status_code")
 
         if status_code == "FINISHED":
@@ -162,7 +188,7 @@ def wait_until_container_ready(container_id: str, access_token: str) -> None:
         waited_seconds += STATUS_POLL_INTERVAL_SECONDS
 
 
-def publish_story(ig_user_id: str, access_token: str, container_id: str) -> str:
+def publish_story(ig_user_id: str, access_token: str, container_id: str, trace=None) -> str:
     """
     処理が完了したメディアコンテナをStoryとして公開し、公開後のメディアIDを返す。
     """
@@ -171,11 +197,11 @@ def publish_story(ig_user_id: str, access_token: str, container_id: str) -> str:
         "creation_id": container_id,
         "access_token": access_token,
     }
-    data = _request("POST", url, params)
+    data = _request("POST", url, params, trace=trace, step="公開 (media_publish)")
     return data.get("id")
 
 
-def post_story(ig_user_id: str, access_token: str, image_url: str) -> str:
+def post_story(ig_user_id: str, access_token: str, image_url: str, trace=None) -> str:
     """
     画像の公開URLから、Instagramストーリーズへの投稿を最後まで行う。
 
@@ -183,8 +209,11 @@ def post_story(ig_user_id: str, access_token: str, image_url: str) -> str:
     2. 処理が完了する（FINISHED）まで待つ
     3. Storyとして公開する
 
+    traceにリストを渡すと、各ステップのHTTPステータスコードと応答本文を
+    （アクセストークンなどを含めずに）追記していく。デバッグ表示用。
+
     戻り値: 公開されたメディアのID
     """
-    container_id = create_story_container(ig_user_id, access_token, image_url)
-    wait_until_container_ready(container_id, access_token)
-    return publish_story(ig_user_id, access_token, container_id)
+    container_id = create_story_container(ig_user_id, access_token, image_url, trace=trace)
+    wait_until_container_ready(container_id, access_token, trace=trace)
+    return publish_story(ig_user_id, access_token, container_id, trace=trace)
