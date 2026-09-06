@@ -13,15 +13,18 @@ Geminiには「改行を追加すること」だけを許可し、
 ・原文と文字が完全に一致しているか（改行を除いて比較）
 を必ず検証する。検証に失敗した場合は例外を送出する。
 
-Gemini APIキーは st.secrets["GEMINI_API_KEY"] から読み込み、
-コード内に直接書かない。
+Gemini APIキーとモデル名は、それぞれ
+st.secrets["GEMINI_API_KEY"] / st.secrets["GEMINI_MODEL"]
+から読み込み、コード内に直接書かない。
+モデル名をSecrets側で管理することで、Google側でモデルが
+廃止・変更された場合もコードを書き換えずに対応できるようにする。
 """
 
 import streamlit as st
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 
-MODEL_NAME = "gemini-2.0-flash"
 MAX_LINE_LENGTH = 20
 
 PROMPT_TEMPLATE = """\
@@ -73,18 +76,46 @@ def _get_client() -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
+def _get_model_name() -> str:
+    model_name = st.secrets.get("GEMINI_MODEL")
+    if not model_name:
+        raise GeminiFormatError(
+            "Geminiモデル名が設定されていません。"
+            "Streamlit SecretsにGEMINI_MODELを追加してください。"
+        )
+    return model_name
+
+
+def _is_model_error(error: genai_errors.APIError) -> bool:
+    """指定されたGeminiモデルが見つからない・利用できないエラーかどうかを判定する。"""
+    status = (getattr(error, "status", "") or "").upper()
+    return getattr(error, "code", None) == 404 or status == "NOT_FOUND"
+
+
 def _call_gemini(text: str) -> str:
     client = _get_client()
+    model_name = _get_model_name()
     prompt = PROMPT_TEMPLATE.format(text=text)
 
     try:
         response = client.models.generate_content(
-            model=MODEL_NAME,
+            model=model_name,
             contents=prompt,
             config=types.GenerateContentConfig(temperature=0.2),
         )
     except GeminiFormatError:
         raise
+    except genai_errors.APIError as e:
+        if _is_model_error(e):
+            raise GeminiFormatError(
+                "現在設定されているGeminiモデルを利用できません。"
+                "管理者にお問い合わせください。",
+                detail=str(e),
+            )
+        raise GeminiFormatError(
+            "Gemini APIとの通信に失敗しました。しばらくしてから再度お試しください。",
+            detail=str(e),
+        )
     except Exception as e:
         raise GeminiFormatError(
             "Gemini APIとの通信に失敗しました。しばらくしてから再度お試しください。",
