@@ -1,10 +1,15 @@
+import hashlib
+
 import streamlit as st
 
 from app_meta import inject_mobile_meta_tags, resolve_page_icon
+from cloudinary_storage import CloudinaryError, delete_story_image, upload_story_image
+from instagram_api import InstagramAPIError, get_instagram_credentials, post_story
 from story_image import (
     DEFAULT_MAX_FONT_SIZE,
     DEFAULT_TEXT_COLOR,
     StoryImageError,
+    convert_png_to_jpeg,
     generate_story_image,
     load_background_image,
 )
@@ -57,6 +62,14 @@ if "story_warning" not in st.session_state:
     st.session_state.story_warning = None
 if "design_reset_id" not in st.session_state:
     st.session_state.design_reset_id = 0
+if "ig_post_confirm_pending" not in st.session_state:
+    st.session_state.ig_post_confirm_pending = False
+if "last_posted_image_hash" not in st.session_state:
+    st.session_state.last_posted_image_hash = None
+if "ig_post_success_message" not in st.session_state:
+    st.session_state.ig_post_success_message = None
+if "ig_post_error" not in st.session_state:
+    st.session_state.ig_post_error = None
 
 st.markdown('<div class="tt-step-title">1. Threadsアカウントを選択</div>', unsafe_allow_html=True)
 with st.container(border=True):
@@ -132,12 +145,14 @@ if convert_clicked:
 
                     st.session_state.result = {
                         "mode": mode,
+                        "account_label": selected_account,
                         "account_name": account_name,
                         "profile_image_url": profile_image_url,
                         "original_text": original_text,
                         "reply_texts": reply_texts,
                     }
                     st.session_state.design_reset_id += 1
+                    st.session_state.ig_post_confirm_pending = False
 
                     if mode == MODE_INSTAGRAM:
                         try:
@@ -255,6 +270,97 @@ if result and result["mode"] == MODE_INSTAGRAM:
             mime="image/png",
             use_container_width=True,
         )
+
+        current_image_bytes = st.session_state.story_image_bytes
+        current_image_hash = hashlib.sha256(current_image_bytes).hexdigest()
+        already_posted = st.session_state.last_posted_image_hash == current_image_hash
+
+        if st.session_state.ig_post_success_message:
+            st.success(st.session_state.ig_post_success_message)
+            st.session_state.ig_post_success_message = None
+
+        if st.session_state.ig_post_error:
+            ig_error = st.session_state.ig_post_error
+            st.error(ig_error["message"])
+            with st.expander("デバッグ情報（エラー詳細）"):
+                st.write(ig_error["detail"] or "詳細情報はありません。")
+            st.session_state.ig_post_error = None
+
+        post_clicked = st.button(
+            "ストーリーズ投稿",
+            key="ig_post_button",
+            use_container_width=True,
+        )
+        if post_clicked:
+            st.session_state.ig_post_confirm_pending = True
+
+        if st.session_state.ig_post_confirm_pending:
+            ig_credentials = get_instagram_credentials(result["account_label"])
+
+            if not ig_credentials:
+                st.error("このアカウントにはInstagram投稿設定がありません。")
+                st.session_state.ig_post_confirm_pending = False
+            else:
+                if already_posted:
+                    st.warning(
+                        "この画像は既にInstagramへ投稿済みです。"
+                        "同じ画像を再投稿する場合のみ「投稿する」を押してください。"
+                    )
+                st.warning(
+                    f"この画像を「{result['account_label']}」の"
+                    "Instagramストーリーズへ投稿しますか？"
+                )
+                confirm_col, cancel_col = st.columns(2)
+                with confirm_col:
+                    ig_confirm_clicked = st.button(
+                        "投稿する", key="ig_post_confirm", use_container_width=True
+                    )
+                with cancel_col:
+                    ig_cancel_clicked = st.button(
+                        "キャンセル", key="ig_post_cancel", use_container_width=True
+                    )
+
+                if ig_cancel_clicked:
+                    st.session_state.ig_post_confirm_pending = False
+
+                if ig_confirm_clicked:
+                    st.session_state.ig_post_confirm_pending = False
+                    try:
+                        with st.spinner("Instagramへ投稿しています..."):
+                            jpeg_bytes = convert_png_to_jpeg(current_image_bytes)
+                            image_url, public_id = upload_story_image(jpeg_bytes)
+                            post_story(
+                                ig_credentials["ig_user_id"],
+                                ig_credentials["access_token"],
+                                image_url,
+                            )
+                    except CloudinaryError as e:
+                        st.session_state.ig_post_error = {
+                            "message": e.friendly_message,
+                            "detail": e.detail,
+                        }
+                    except InstagramAPIError as e:
+                        st.session_state.ig_post_error = {
+                            "message": e.friendly_message,
+                            "detail": e.detail,
+                        }
+                    except Exception as e:
+                        st.session_state.ig_post_error = {
+                            "message": "投稿用画像の準備に失敗しました。もう一度お試しください。",
+                            "detail": str(e),
+                        }
+                    else:
+                        # Instagramへの投稿が成功した後にCloudinaryの一時画像を削除する。
+                        # 削除に失敗しても、投稿自体は成功として扱う。
+                        delete_story_image(public_id)
+                        st.session_state.last_posted_image_hash = current_image_hash
+                        st.session_state.ig_post_success_message = (
+                            "Instagramストーリーズへの投稿が完了しました。"
+                        )
+
+                    # 確認ダイアログを画面から消し、結果メッセージだけを
+                    # きれいに表示し直すために再実行する。
+                    st.rerun()
 
 elif result and result["mode"] == MODE_NOTE:
     st.markdown('<div class="tt-step-title">note投稿用テキスト</div>', unsafe_allow_html=True)

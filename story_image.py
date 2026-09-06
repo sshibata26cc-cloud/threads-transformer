@@ -306,3 +306,17 @@ def generate_story_image(
     buffer = io.BytesIO()
     canvas.convert("RGB").save(buffer, format="PNG")
     return buffer.getvalue(), warning
+
+
+DEFAULT_JPEG_QUALITY = 95
+
+
+def convert_png_to_jpeg(png_bytes: bytes, quality: int = DEFAULT_JPEG_QUALITY) -> bytes:
+    """
+    generate_story_image()が生成したPNG画像を、Instagram投稿用に
+    高画質のJPEG（RGB、1080x1920）へ変換する。見た目は変更しない。
+    """
+    image = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=quality)
+    return buffer.getvalue()
