@@ -1,5 +1,7 @@
 import streamlit as st
 
+from gemini_formatter import GeminiFormatError, format_for_note
+from story_image import StoryImageError, generate_story_image
 from threads_api import (
     ThreadsAPIError,
     extract_username_and_shortcode,
@@ -10,6 +12,9 @@ from threads_api import (
     get_post_replies,
     get_profile,
 )
+
+MODE_INSTAGRAM = "Instagram ストーリーズ 投稿用"
+MODE_NOTE = "note 投稿用"
 
 st.set_page_config(
     page_title="Threads Transformer",
@@ -23,11 +28,11 @@ st.write(
     "note投稿用文章に変換します。"
 )
 
-st.header("Instagram ストーリーズ 投稿用")
-st.info("この機能は準備中です。")
-
-st.header("note 投稿用")
-st.info("この機能は準備中です。")
+st.header("変換先を選択")
+mode = st.radio(
+    "変換したい形式を選んでください",
+    (MODE_INSTAGRAM, MODE_NOTE),
+)
 
 st.header("Threads投稿の読み込み")
 
@@ -72,28 +77,53 @@ if st.button("変換する"):
                     if not post_summary:
                         st.error("入力されたURLに対応する投稿が見つかりませんでした。")
                     else:
-                        st.success("投稿情報を取得しました。")
+                        st.success("Threadsから投稿情報を取得しました。")
+                        reply_texts = [r.get("text", "") for r in own_replies]
 
-                        st.subheader("投稿内容（確認用）")
+                        if mode == MODE_INSTAGRAM:
+                            try:
+                                with st.spinner("ストーリーズ画像を生成しています..."):
+                                    image_bytes, warning = generate_story_image(
+                                        profile_image_url=(profile or {}).get(
+                                            "threads_profile_picture_url"
+                                        ),
+                                        account_name=post.get("username", username),
+                                        original_text=post.get("text", ""),
+                                        own_replies=reply_texts,
+                                    )
+                            except StoryImageError as e:
+                                st.error(e.friendly_message)
+                                with st.expander("デバッグ情報（エラー詳細）"):
+                                    st.write(e.detail or "詳細情報はありません。")
+                            else:
+                                if warning:
+                                    st.warning(warning)
+                                st.subheader("生成されたストーリーズ画像")
+                                st.image(image_bytes)
+                                st.download_button(
+                                    "PNGをダウンロード",
+                                    data=image_bytes,
+                                    file_name="threads_story.png",
+                                    mime="image/png",
+                                )
 
-                        profile_col, text_col = st.columns([1, 4])
-                        with profile_col:
-                            picture_url = (profile or {}).get("threads_profile_picture_url")
-                            if picture_url:
-                                st.image(picture_url, width=64)
-                        with text_col:
-                            st.write(f"**{post.get('username', username)}**")
-                            st.caption(post.get("timestamp", ""))
-
-                        st.write(post.get("text", ""))
-
-                        st.markdown("### 本人による返信")
-                        if own_replies:
-                            for reply in own_replies:
-                                st.write(reply.get("text", ""))
-                                st.caption(reply.get("timestamp", ""))
-                        else:
-                            st.write("本人による返信はありませんでした。")
+                        else:  # MODE_NOTE
+                            try:
+                                with st.spinner("Geminiで文章を整形しています..."):
+                                    formatted_text = format_for_note(
+                                        post.get("text", ""), reply_texts
+                                    )
+                            except GeminiFormatError as e:
+                                st.error(e.friendly_message)
+                                with st.expander("デバッグ情報（エラー詳細）"):
+                                    st.write(e.detail or "詳細情報はありません。")
+                            else:
+                                st.subheader("整形されたnote投稿用の文章")
+                                st.text_area(
+                                    "コピーしてお使いください",
+                                    value=formatted_text,
+                                    height=400,
+                                )
 
                 except ThreadsAPIError as e:
                     st.error(e.friendly_message)
