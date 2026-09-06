@@ -2,17 +2,22 @@
 Threads API とのやり取りをまとめたモジュール。
 
 このファイルには、
-- ThreadsのURLからアカウント名と投稿IDを取り出す処理
-- Streamlit Secretsからアクセストークンを取り出す処理
+- 画面で選択されたThreadsアカウント名からアクセストークンを取り出す処理
+- Threads共有URL（/share/...）から実際の投稿URLを解決する処理
+- URLを正規化し、投稿一覧の中から対象の投稿を特定する処理
 - Threads APIを呼び出して投稿情報・返信一覧を取得する処理
 をまとめています。
 
 アクセストークンはコード内に書かず、必ず Streamlit Secrets
 （st.secrets）経由で読み込みます。
+
+アクセストークンの選択は、URLから推測するのではなく、
+画面上でユーザーが選んだThreadsアカウントによって決まります。
 """
 
 import re
 from typing import Optional
+from urllib.parse import urlsplit
 
 import requests
 import streamlit as st
@@ -20,13 +25,27 @@ import streamlit as st
 API_BASE = "https://graph.threads.net/v1.0"
 
 # Threads APIから取得するフィールド一覧
-POST_LIST_FIELDS = "id,text,timestamp,permalink,username,shortcode"
-POST_DETAIL_FIELDS = "id,text,timestamp,permalink,username,shortcode"
+POST_LIST_FIELDS = "id,text,timestamp,permalink,username"
+POST_DETAIL_FIELDS = "id,text,timestamp,permalink,username"
 REPLY_FIELDS = "id,text,timestamp,permalink,username,is_reply"
 PROFILE_FIELDS = "id,username,threads_profile_picture_url"
 
 # Threads投稿一覧を何ページまで遡って探すか（投稿が多いアカウント向けの上限）
 MAX_SEARCH_PAGES = 10
+
+THREADS_DOMAIN_RE = re.compile(r"threads\.(?:net|com)", re.IGNORECASE)
+SHARE_URL_RE = re.compile(r"threads\.(?:net|com)/share/", re.IGNORECASE)
+CANONICAL_LINK_RE = re.compile(
+    r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']([^"\']+)["\']', re.IGNORECASE
+)
+OG_URL_RE = re.compile(
+    r'<meta[^>]+property=["\']og:url["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE
+)
+
+SHARE_LINK_ERROR_MESSAGE = (
+    "Threadsリンクを確認できませんでした。"
+    "もう一度Threadsからリンクをコピーしてお試しください。"
+)
 
 
 class ThreadsAPIError(Exception):
@@ -39,26 +58,14 @@ class ThreadsAPIError(Exception):
         self.response_text = response_text
 
 
-def extract_username_and_shortcode(url: str):
-    """
-    ThreadsのURLから (アカウント名, 投稿ID) を取り出す。
+def is_threads_url(url: str) -> bool:
+    """入力された文字列が、Threadsの投稿URL・共有URLらしいかどうかを判定する。"""
+    return bool(url) and bool(THREADS_DOMAIN_RE.search(url))
 
-    例:
-        https://www.threads.net/@shin.coaching/post/Cxxxxxxxx
-        -> ("shin.coaching", "Cxxxxxxxx")
 
-    URLの形式が一致しない場合は (None, None) を返す。
-    """
-    if not url:
-        return None, None
-
-    pattern = r"threads\.(?:net|com)/@([^/?#]+)/post/([^/?#]+)"
-    match = re.search(pattern, url.strip())
-    if not match:
-        return None, None
-
-    username, shortcode = match.group(1), match.group(2)
-    return username, shortcode
+def is_share_url(url: str) -> bool:
+    """ThreadsのURLが共有URL（https://www.threads.com/share/xxxxx）かどうかを判定する。"""
+    return bool(url) and bool(SHARE_URL_RE.search(url))
 
 
 def username_to_secret_key(username: str) -> str:
@@ -120,6 +127,64 @@ def _request(url: str, params: Optional[dict] = None) -> dict:
         )
 
 
+def _extract_canonical_url(html: str):
+    """共有ページのHTMLから、canonicalな投稿URLを抜き出す（見つからなければNone）。"""
+    match = CANONICAL_LINK_RE.search(html) or OG_URL_RE.search(html)
+    return match.group(1) if match else None
+
+
+def resolve_target_url(url: str) -> str:
+    """
+    入力されたThreads投稿URLを、投稿の特定に使える形に解決する。
+
+    通常URLはそのまま返す。共有URL（/share/...）の場合は、
+    HTTPリダイレクトを辿った先のURLを使い、それでも共有URLのままの場合は
+    ページ内のcanonical URL / og:url から実際の投稿URLを探す。
+
+    通信に失敗した場合はThreadsAPIError（共有リンク用のメッセージ）を送出する。
+    """
+    if not is_share_url(url):
+        return url
+
+    try:
+        response = requests.get(url, allow_redirects=True, timeout=15)
+    except requests.exceptions.RequestException as e:
+        raise ThreadsAPIError(
+            SHARE_LINK_ERROR_MESSAGE,
+            status_code=None,
+            response_text=str(e),
+        )
+
+    if response.status_code >= 400:
+        raise ThreadsAPIError(
+            SHARE_LINK_ERROR_MESSAGE,
+            status_code=response.status_code,
+            response_text=response.text,
+        )
+
+    final_url = response.url
+    if is_share_url(final_url):
+        canonical = _extract_canonical_url(response.text)
+        if canonical:
+            final_url = canonical
+
+    return final_url
+
+
+def _normalized_path(url: str) -> str:
+    """
+    URLを比較しやすい形に正規化する。
+
+    ドメインの違い（threads.net / threads.com、wwwの有無）、
+    末尾の「/」、`?hl=ja` などのクエリパラメータの違いを吸収し、
+    パス部分（例: /@shin.coaching/post/xxxxx）だけを取り出す。
+    """
+    if not url:
+        return ""
+    path = urlsplit(url).path
+    return path.rstrip("/").lower()
+
+
 def get_profile(access_token: str) -> dict:
     """アクセストークンに紐づくアカウントのプロフィール情報を取得する。"""
     url = f"{API_BASE}/me"
@@ -143,16 +208,17 @@ def _iter_own_posts(access_token: str):
         pages_fetched += 1
 
 
-def find_post_by_shortcode(access_token: str, shortcode: str):
+def find_post_by_permalink(access_token: str, target_url: str):
     """
-    投稿一覧の中から、URLに含まれる投稿IDに一致する投稿を探す。
+    投稿一覧の中から、正規化したURLが一致する投稿を探す。
     見つからない場合はNoneを返す。
     """
-    if not shortcode:
+    target_path = _normalized_path(target_url)
+    if not target_path:
         return None
 
     for post in _iter_own_posts(access_token):
-        if post.get("shortcode") == shortcode or shortcode in (post.get("permalink") or ""):
+        if _normalized_path(post.get("permalink")) == target_path:
             return post
     return None
 
