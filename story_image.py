@@ -323,15 +323,17 @@ def generate_story_image(
 
     font_size = max(MIN_BODY_FONT_SIZE, max_font_size or DEFAULT_MAX_FONT_SIZE)
     body_font = _load_font(font_size, font_key=font_key, sample_text=sample_text)
+    line_height = int(font_size * LINE_HEIGHT_RATIO)
     wrapped_blocks, total_height = _measure_blocks(
-        draw, blocks, body_font, max_width, int(font_size * LINE_HEIGHT_RATIO)
+        draw, blocks, body_font, max_width, line_height
     )
 
     while total_height > available_height and font_size > MIN_BODY_FONT_SIZE:
         font_size -= FONT_STEP
         body_font = _load_font(font_size, font_key=font_key, sample_text=sample_text)
+        line_height = int(font_size * LINE_HEIGHT_RATIO)
         wrapped_blocks, total_height = _measure_blocks(
-            draw, blocks, body_font, max_width, int(font_size * LINE_HEIGHT_RATIO)
+            draw, blocks, body_font, max_width, line_height
         )
 
     warning = None
@@ -346,7 +348,27 @@ def generate_story_image(
     #  中央位置を計算する」という順序を守るため、この計算は必ず自動縮小
     # ループより後（＝font_size・wrapped_blocks・total_heightが確定した後）
     # に行う。ここより後でfont_sizeを変更してはならない。
+    #
+    # total_height（_measure_blocksの合計）は、各行を「行間
+    # （line_height = font_size × LINE_HEIGHT_RATIO）」という枠1つぶんとして
+    # 積み上げた値であり、最後の行の枠の中では、実際の文字の高さ
+    # （font.getmetrics()のascent+descent。文字背景ONの場合はその余白pad_yも
+    # 含む）より下に、次の行のための余白が使われずに残っている。
+    # 中央配置の計算にそのままtotal_heightを使うと、実際には描画されていない
+    # この「最後の行の余った下余白」ぶんだけ、見た目の内容全体が本来の中央より
+    # 上へずれてしまう（＝下側の余白が実際より広く見える）。
+    # そのため、最後の行についてだけ「枠の高さ」ではなく「実際に描画される
+    # 高さ」に置き換えてから中央位置を計算する。
     content_total_height = header_height + SECTION_GAP + total_height
+    if wrapped_blocks and wrapped_blocks[-1]:
+        ascent, descent = body_font.getmetrics()
+        real_last_line_height = ascent + descent
+        if text_bg_rgb is not None:
+            # 文字背景の帯は、行の実際の文字より下（pad_yぶん）まで描画される。
+            # 帯ごと中央に揃えるため、帯の下端までを「実際の高さ」とみなす。
+            real_last_line_height += max(2, round(font_size * TEXT_BG_PAD_Y_RATIO))
+        trailing_slack = max(0, line_height - real_last_line_height)
+        content_total_height -= trailing_slack
     # 極端に文章量が多く自動縮小しても収まりきらない場合は、これまで通り
     # 上（MARGIN_TOP）を基準にする（中央寄せしようとして上端がマージンより
     # 上にはみ出さないようにするための安全策）。
@@ -368,7 +390,8 @@ def generate_story_image(
     text_items = [(name_x, name_y, account_name or "", name_font)]
 
     # --- 本文・返信 ---
-    line_height = int(font_size * LINE_HEIGHT_RATIO)
+    # line_heightは、上の中央配置計算で使ったものと必ず同じ値を使う
+    # （自動縮小ループの後に確定したfont_sizeから計算済みのものを再利用する）。
     y = start_y + header_height + SECTION_GAP
 
     for i, lines in enumerate(wrapped_blocks):

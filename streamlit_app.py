@@ -163,12 +163,27 @@ def _push_carousel_history(reset_id):
     history = st.session_state.carousel_history
     index = st.session_state.carousel_history_index
     current = _current_carousel_state(reset_id)
+    current_sig = _carousel_content_signature(current)
 
-    if history and _carousel_content_signature(current) == _carousel_content_signature(
-        history[index]
-    ):
+    if history and current_sig == _carousel_content_signature(history[index]):
         if history[index]["selected_id"] != current["selected_id"]:
             history[index]["selected_id"] = current["selected_id"]
+            st.session_state.carousel_history = history
+        return
+
+    # 新しい履歴として積む前に、末尾の実エントリ（history[-1]）ともう一度だけ
+    # 比較する。ボタン操作による再実行と、横スクロール／画像クリックに由来する
+    # 選択変更の再実行が極めて近いタイミングで重なると、双方が更新前の古い
+    # carousel_history_indexを見たまま「内容が変わった」と判定してしまい、
+    # まったく同じ内容の履歴が2件連続で積まれてしまうことがあった
+    # （＝一見「元に戻す」が効かないように見える不具合の原因。実際には
+    # 1回目のUndoが、直前と中身が同じ“重複した1手”へ戻っていただけだった）。
+    # index基準の判定だけでなく、実際の末尾ともここで比較しておくことで、
+    # このケースでは新しい履歴を積まずに済み、この重複を防げる。
+    if history and current_sig == _carousel_content_signature(history[-1]):
+        st.session_state.carousel_history_index = len(history) - 1
+        if history[-1]["selected_id"] != current["selected_id"]:
+            history[-1]["selected_id"] = current["selected_id"]
             st.session_state.carousel_history = history
         return
 
@@ -647,6 +662,15 @@ elif result and result["mode"] == MODE_CAROUSEL:
             # （＝スクロールだけではUndo履歴を消費しない）。
             st.session_state.carousel_selected_id = synced_page_id
             st.session_state.carousel_force_editor_resync = True
+            # このページはJS側の判定で「すでに中央に来ている」と分かったから
+            # 選択されている。ここでinject_carousel_center_scroll_js()による
+            # 追加のscrollIntoView()を発火させると、そのscroll操作自体が
+            # 新たなscrollイベントとして検知され、再び選択通知→ 再センタリング
+            # …という無限に近いフィードバックループを引き起こし、その連鎖する
+            # 再実行の合間に本来の（元に戻す等の）ボタンクリックが失われることが
+            # あった。スクロール由来の選択変更では自動センタリングを呼ばないことで、
+            # このループを断つ。
+            st.session_state.carousel_skip_auto_center = True
 
     # 選択中ページが何らかの理由でページ一覧から消えていたら、先頭ページへ戻す。
     if page_ids and st.session_state.carousel_selected_id not in page_ids:
@@ -933,7 +957,15 @@ elif result and result["mode"] == MODE_CAROUSEL:
 
         # 選択中ページが変わったときに、そのカードを横スクロール領域の
         # 中央へ自動的にスクロールする（scroll-snapと組み合わせて使う）。
-        inject_carousel_center_scroll_js(selected_id)
+        # ただし、今回の選択変更がスクロール自体（JSの中央判定）によるものだった
+        # 場合はスキップする。そのカードは判定の時点ですでに中央にあり、
+        # ここで改めてscrollIntoView()すると、それ自体が新たなscrollイベントを
+        # 生み、再び選択通知→再センタリングを繰り返すフィードバックループに
+        # なってしまうため（このループの連鎖中はボタンクリックが失われることもあった）。
+        if st.session_state.pop("carousel_skip_auto_center", False):
+            pass
+        else:
+            inject_carousel_center_scroll_js(selected_id)
 
         # --- 「ページ N / M を編集中」表示 ---
         # プレビュー画像そのものにはページ番号を描画していないため、

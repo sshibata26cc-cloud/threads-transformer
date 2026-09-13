@@ -171,6 +171,23 @@ def inject_carousel_center_scroll_js(selected_page_id):
     「一度だけ登録するイベントリスナー」ではなく「今回の描画1回だけ行いたい
     動作」なので、Ctrl+Z検知のような『親ページへの一度きりの<script>挿入』は
     不要で、iframe内から直接window.parent上で実行してよい。
+
+    ここで行うscrollIntoView()自体も、ブラウザ上ではれっきとした「scroll」
+    イベントを発生させる。そのため、もしinject_carousel_shortcuts_js側の
+    スクロール監視（中央に来たカードを自動選択する処理）がこれをそのまま
+    「ユーザーによる新しいスクロール操作」として検知してしまうと、
+    ・ボタン操作（追加／削除／元に戻す等）で選択が変わる
+    ・ここで選択カードを中央へ自動スクロールする
+    ・そのscrollイベントを検知し、（アニメーションの途中経過や誤差で）
+      別のカードを「中央に最も近い」と誤判定して選択し直してしまう
+    ・その選択変更でまた再描画→再度ここが呼ばれる→…
+    というフィードバックループになり得る。加えて、この連鎖的な再実行の
+    合間に本来のボタンクリックの処理が割り込まれ、正しく反映されない
+    （＝Undo履歴が二重に積まれる、選択が意図せず巻き戻る等）ことがあった。
+    これを防ぐため、scrollIntoView()を呼ぶ直前に「これはプログラムによる
+    スクロールである」ことを示すタイムスタンプを親ウィンドウに記録し、
+    スクロール監視側はこの直後の一定時間（アニメーションが収まるまでの
+    十分な猶予）はスクロールを無視するようにしている。
     """
     if not selected_page_id:
         return
@@ -185,6 +202,10 @@ def inject_carousel_center_scroll_js(selected_page_id):
             function centerSelectedCard() {{
                 var el = doc.querySelector(target);
                 if (el && el.scrollIntoView) {{
+                    // スムーズスクロールのアニメーション（+その後の余韻）が
+                    // 収まるのに十分な時間、以降のscrollイベントを
+                    // 「プログラムによるものかもしれない」として扱う。
+                    window.parent.__ttCarouselProgrammaticScrollUntil = Date.now() + 900;
                     el.scrollIntoView({{ behavior: 'smooth', inline: 'center', block: 'nearest' }});
                 }}
             }}
@@ -199,7 +220,7 @@ def inject_carousel_center_scroll_js(selected_page_id):
     components.html(html, height=0)
 
 
-def inject_carousel_shortcuts_js(scroll_sync_key: str):
+def inject_carousel_shortcuts_js(scroll_sync_key: str = None):
     """
     以下4つの操作を実現する、ごく小さなJavaScriptを埋め込む。
 
@@ -354,6 +375,14 @@ def inject_carousel_shortcuts_js(scroll_sync_key: str):
         var scrollDebounceTimer = null;
 
         function reportCenterCard(row) {
+            // inject_carousel_center_scroll_js()自身のscrollIntoView()が
+            // 引き起こしたscrollである可能性がある間は、中央カードの再判定・
+            // 再選択を行わない（フィードバックループ防止。詳細はcarousel_ui.pyの
+            // inject_carousel_center_scroll_jsのコメントを参照）。
+            var until = window.__ttCarouselProgrammaticScrollUntil || 0;
+            if (Date.now() < until) {
+                return;
+            }
             var rowRect = row.getBoundingClientRect();
             var rowCenter = rowRect.left + rowRect.width / 2;
             var cards = row.querySelectorAll('[class*="st-key-carousel_card_"]');
@@ -387,9 +416,14 @@ def inject_carousel_shortcuts_js(scroll_sync_key: str):
     """
     inner_js = inner_js.replace("__UNDO_LABEL__", json.dumps(UNDO_BUTTON_LABEL))
     inner_js = inner_js.replace("__REDO_LABEL__", json.dumps(REDO_BUTTON_LABEL))
+    # scroll_sync_keyが渡されなかった場合（呼び出し側が更新される前の一時的な
+    # 不整合など）でも、存在しない要素を安全に指すセレクタにしておく。
+    # querySelectorはnullを返すだけなので、クリック／スクロール同期機能だけが
+    # 静かに無効化され、Ctrl+Z/Ctrl+Yのショートカット機能はこの後も維持される。
+    sync_selector = f".st-key-{scroll_sync_key} input" if scroll_sync_key else "[data-tt-carousel-sync-unavailable]"
     inner_js = inner_js.replace(
         "__SYNC_INPUT_SELECTOR__",
-        json.dumps(f".st-key-{scroll_sync_key} input"),
+        json.dumps(sync_selector),
     )
 
     outer_html = """
