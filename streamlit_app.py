@@ -2,17 +2,17 @@ import hashlib
 import uuid
 
 import streamlit as st
-from streamlit_sortables import sort_items
 
 from app_fonts import DEFAULT_FONT_KEY, FONT_OPTIONS
 from app_meta import inject_mobile_meta_tags, resolve_page_icon
 from carousel_generator import generate_carousel_page_image
 from carousel_splitter import split_into_pages
 from carousel_ui import (
-    CAROUSEL_CARD_WIDTH,
+    COVERFLOW_RADIUS,
     REDO_BUTTON_LABEL,
     UNDO_BUTTON_LABEL,
     inject_carousel_card_css,
+    inject_carousel_center_scroll_js,
     inject_carousel_shortcuts_js,
 )
 from cloudinary_storage import (
@@ -638,50 +638,14 @@ elif result and result["mode"] == MODE_CAROUSEL:
         st.session_state.carousel_editor_owner_id = selected_id
 
     # 編集欄の最新の内容を、選択中ページの保存領域へ書き戻す。
-    # 以降のサムネイル生成・並び替え・Undo履歴の判定は、すべてこの保存領域を参照する。
+    # 以降のサムネイル生成・Undo履歴の判定は、すべてこの保存領域を参照する。
     if selected_id is not None:
         st.session_state.carousel_store[selected_id] = st.session_state.get(
             "carousel_active_editor", ""
         )
 
-    # --- ドラッグ＆ドロップによる並び替え ---
-    # 画像そのものをドラッグ対象にはできないため、「順番の入れ替え」だけを
-    # 担当する軽量な操作バーを、画像カード列の前に置いている。
-    # ボタン操作（追加・削除・Undo/Redo）より先にここで並び替えを確定させることで、
-    # 直後に計算するUndo/Redoの押せる/押せない状態がこの回の操作をすぐ反映できる。
-    page_texts = {pid: st.session_state.carousel_store.get(pid, "") for pid in page_ids}
-
-    if page_ids:
-
-        def _sort_label(index, pid):
-            snippet = page_texts[pid].replace("\n", " ").strip()[:12]
-            return f"{index + 1}. {snippet}" if snippet else f"{index + 1}. (空白)"
-
-        sort_labels = [_sort_label(i, pid) for i, pid in enumerate(page_ids)]
-        label_to_id = dict(zip(sort_labels, page_ids))
-
-        st.caption("↕ ドラッグして並び替え")
-        # keyに現在の並び順を含めることで、Undo/Redoなどドラッグ以外の理由で
-        # ページ順が変わったときはウィジェットを作り直させ、内部に残った
-        # 古い並びが表示され続けないようにする。
-        sorted_labels = sort_items(
-            sort_labels,
-            direction="horizontal",
-            key=f"carousel_sort_{reset_id}_{'|'.join(page_ids)}",
-            custom_style="""
-            .sortable-component { background-color: #FBF6EC; border-radius: 10px; padding: 6px; }
-            .sortable-item { background-color: #FFFDF8; border: 1px solid #E7DAC5;
-                             color: #3B2E27; border-radius: 8px; }
-            .sortable-item.active { border-color: #A9673F; }
-            """,
-        )
-        new_order = [label_to_id[label] for label in sorted_labels if label in label_to_id]
-        if len(new_order) == len(page_ids) and new_order != page_ids:
-            st.session_state.carousel_page_ids = new_order
-            page_ids = new_order
-
-    # ここまでの並び替えを反映したうえで、今回の実行で確定した状態を履歴に記録する。
-    # （テキスト編集・デザイン変更・並び替えは、ここより前に session_state へ反映済み）
+    # ここまでの内容（テキスト編集・デザイン変更）を反映したうえで、
+    # 今回の実行で確定した状態を履歴に記録する。
     _push_carousel_history(reset_id)
 
     history = st.session_state.carousel_history
@@ -689,33 +653,39 @@ elif result and result["mode"] == MODE_CAROUSEL:
     can_undo = history_index > 0
     can_redo = history_index < len(history) - 1
     can_delete_page = len(page_ids) > 1
+    selected_index_now = page_ids.index(selected_id) if selected_id in page_ids else -1
+    can_move_prev = selected_index_now > 0
+    can_move_next = 0 <= selected_index_now < len(page_ids) - 1
 
-    # ページ操作（追加・削除・元に戻す・やり直す）をひとまとめに配置する。
-    action_add_col, action_delete_col, action_undo_col, action_redo_col = st.columns(4)
-    with action_add_col:
-        add_page_clicked = st.button(
-            "ページを追加", key="carousel_add_page", use_container_width=True
-        )
-    with action_delete_col:
+    # ページ操作（追加・削除・元に戻す・やり直す・前後移動）を1か所の
+    # 操作パネルにまとめる。horizontal=True, wrap=Trueなので、
+    # PCでは横並び、画面幅が狭い場合は自然に折り返す。
+    st.markdown(
+        """
+        <style>
+        .st-key-carousel_action_panel {
+            background-color: var(--tt-card-bg);
+            border: 1px solid var(--tt-border);
+            border-radius: 12px;
+            padding: 0.8rem;
+            row-gap: 0.5rem !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    with st.container(horizontal=True, wrap=True, key="carousel_action_panel"):
+        add_page_clicked = st.button("ページを追加", key="carousel_add_page")
         delete_page_clicked = st.button(
-            "選択中のページを削除",
-            key="carousel_delete_page",
-            use_container_width=True,
-            disabled=not can_delete_page,
+            "ページを削除", key="carousel_delete_page", disabled=not can_delete_page
         )
-    with action_undo_col:
-        undo_clicked = st.button(
-            UNDO_BUTTON_LABEL,
-            key="carousel_undo",
-            use_container_width=True,
-            disabled=not can_undo,
+        undo_clicked = st.button(UNDO_BUTTON_LABEL, key="carousel_undo", disabled=not can_undo)
+        redo_clicked = st.button(REDO_BUTTON_LABEL, key="carousel_redo", disabled=not can_redo)
+        move_prev_clicked = st.button(
+            "前に移動", key="carousel_move_prev", disabled=not can_move_prev
         )
-    with action_redo_col:
-        redo_clicked = st.button(
-            REDO_BUTTON_LABEL,
-            key="carousel_redo",
-            use_container_width=True,
-            disabled=not can_redo,
+        move_next_clicked = st.button(
+            "後ろに移動", key="carousel_move_next", disabled=not can_move_next
         )
 
     # Ctrl+Z/Ctrl+Y（Mac: Cmd+Z/Cmd+Shift+Z）でも、上と同じボタンを操作させる。
@@ -733,6 +703,11 @@ elif result and result["mode"] == MODE_CAROUSEL:
         st.session_state.carousel_page_ids = ids
         st.session_state.carousel_store[new_id] = ""
         st.session_state.carousel_selected_id = new_id
+        # このボタンの処理はcarousel_active_editor（共有テキスト編集欄）を
+        # 描画するより前でst.rerun()するため、Streamlitが「今回は描画されな
+        # かったウィジェット」としてその状態を破棄してしまうことがある。
+        # 次の描画で必ずcarousel_storeから読み直させることで、これを防ぐ。
+        st.session_state.carousel_force_editor_resync = True
         st.rerun()
 
     if delete_page_clicked and can_delete_page:
@@ -744,6 +719,7 @@ elif result and result["mode"] == MODE_CAROUSEL:
         # 可能なら直前のページ、それが無ければ（先頭を削除した場合）次のページを選択する。
         new_selected_index = deleted_index - 1 if deleted_index > 0 else 0
         st.session_state.carousel_selected_id = ids[new_selected_index]
+        st.session_state.carousel_force_editor_resync = True
         st.rerun()
 
     if undo_clicked and can_undo:
@@ -754,6 +730,25 @@ elif result and result["mode"] == MODE_CAROUSEL:
     if redo_clicked and can_redo:
         st.session_state.carousel_history_index = history_index + 1
         _apply_carousel_state(history[history_index + 1], reset_id)
+        st.rerun()
+
+    if move_prev_clicked and can_move_prev:
+        ids = list(st.session_state.carousel_page_ids)
+        idx = ids.index(selected_id)
+        ids[idx - 1], ids[idx] = ids[idx], ids[idx - 1]
+        st.session_state.carousel_page_ids = ids
+        # 選択中ページ自体（ID）は変えず、表示位置だけが1つ前へ動く。
+        # carousel_active_editorを描画する前でrerunするため、次の描画で
+        # 必ず（選択中ページ自身の）本文をcarousel_storeから読み直させる。
+        st.session_state.carousel_force_editor_resync = True
+        st.rerun()
+
+    if move_next_clicked and can_move_next:
+        ids = list(st.session_state.carousel_page_ids)
+        idx = ids.index(selected_id)
+        ids[idx + 1], ids[idx] = ids[idx], ids[idx + 1]
+        st.session_state.carousel_page_ids = ids
+        st.session_state.carousel_force_editor_resync = True
         st.rerun()
 
     # --- 「カルーセルデザイン」ウィジェットの描画 ---
@@ -854,55 +849,78 @@ elif result and result["mode"] == MODE_CAROUSEL:
     if not page_ids:
         st.info("ページがありません。「ページを追加」から作成してください。")
     else:
-        # page_textsは並び替えセクションで既に計算済み（reorderはpidの順番だけを
-        # 変えるので、辞書の中身自体は作り直さなくても引き続き有効）。
+        page_texts = {pid: st.session_state.carousel_store.get(pid, "") for pid in page_ids}
+        selected_index = page_ids.index(selected_id)
 
-        # --- 横スクロールのカードプレビュー一覧 ---
-        inject_carousel_card_css(selected_id)
+        # --- メインプレビュー（コンベア表示） ---
+        # 選択中ページを中心に、前後COVERFLOW_RADIUSページ分だけを表示する。
+        # ページ数が多くても、毎回この範囲の画像だけ生成すればよいため、
+        # 不要な再計算を避けられる。
+        window_start = max(0, selected_index - COVERFLOW_RADIUS)
+        window_end = min(total_pages, selected_index + COVERFLOW_RADIUS + 1)
+        window_indices = list(range(window_start, window_end))
+
+        # 選択中ページ（距離0）からの距離に応じて、CSSでカードの大きさ・
+        # 立体感を段階的に変える（小 → 中 → 大[中央] → 中 → 小）。
+        distance_by_page_id = {
+            page_ids[i]: abs(i - selected_index) for i in window_indices
+        }
+        inject_carousel_card_css(distance_by_page_id)
+
+        selected_image_bytes = None
+        selected_warning = None
 
         with st.container(horizontal=True, wrap=False, key="carousel_thumb_row"):
-            for index, pid in enumerate(page_ids):
-                with st.container(
-                    key=f"carousel_card_{pid}", border=True, width=CAROUSEL_CARD_WIDTH
-                ):
+            for i in window_indices:
+                pid = page_ids[i]
+                is_selected = pid == selected_id
+                with st.container(key=f"carousel_card_{pid}", border=True, width="content"):
+                    page_image_bytes = None
+                    page_warning = None
                     try:
-                        thumb_bytes, _ = _generate_carousel_preview(page_texts.get(pid, ""))
-                    except StoryImageError:
-                        thumb_bytes = None
-                    if thumb_bytes:
-                        st.image(thumb_bytes, width=CAROUSEL_CARD_WIDTH - 24)
-                    if st.button(
-                        str(index + 1),
-                        key=f"carousel_select_{pid}",
-                        use_container_width=True,
-                    ):
-                        st.session_state.carousel_selected_id = pid
-                        st.rerun()
+                        page_image_bytes, page_warning = _generate_carousel_preview(
+                            page_texts.get(pid, "")
+                        )
+                    except StoryImageError as e:
+                        if is_selected:
+                            st.error(e.friendly_message)
+                            with st.expander("デバッグ情報（エラー詳細）"):
+                                st.write(e.detail or "詳細情報はありません。")
 
-        # --- 選択中ページの大きめのプレビューとテキスト編集欄 ---
-        selected_index = page_ids.index(selected_id)
+                    if is_selected:
+                        selected_image_bytes = page_image_bytes
+                        selected_warning = page_warning
+
+                    if page_image_bytes:
+                        # 画像そのものの生成サイズは1080x1350のまま。
+                        # 表示サイズだけをCSS（carousel_ui.py）で縮小・拡大する。
+                        st.image(page_image_bytes, width=280)
+
+                    if not is_selected:
+                        if st.button(
+                            "このページを表示",
+                            key=f"carousel_select_{pid}",
+                            use_container_width=True,
+                        ):
+                            st.session_state.carousel_selected_id = pid
+                            st.rerun()
+
+        # 選択中ページが変わったときに、そのカードを横スクロール領域の
+        # 中央へ自動的にスクロールする（scroll-snapと組み合わせて使う）。
+        inject_carousel_center_scroll_js(selected_id)
+
+        # --- 「ページ N / M を編集中」表示 ---
+        # プレビュー画像そのものにはページ番号を描画していないため、
+        # 現在位置を把握するためのUI表示としてここに残す。
         st.markdown(
             f'<div class="tt-step-title">ページ {selected_index + 1} / {total_pages} を編集中</div>',
             unsafe_allow_html=True,
         )
 
-        selected_image_bytes = None
-        selected_warning = None
-        try:
-            selected_image_bytes, selected_warning = _generate_carousel_preview(
-                page_texts.get(selected_id, "")
-            )
-        except StoryImageError as e:
-            st.error(e.friendly_message)
-            with st.expander("デバッグ情報（エラー詳細）"):
-                st.write(e.detail or "詳細情報はありません。")
+        if selected_warning:
+            st.warning(selected_warning)
 
         if selected_image_bytes:
-            if selected_warning:
-                st.warning(selected_warning)
-            preview_col, _spacer_col = st.columns([1, 1])
-            with preview_col:
-                st.image(selected_image_bytes, use_container_width=True)
             st.download_button(
                 f"ページ{selected_index + 1}のPNGをダウンロード",
                 data=selected_image_bytes,

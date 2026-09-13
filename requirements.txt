@@ -2,4 +2,3 @@ streamlit
 requests
 Pillow
 cloudinary
-streamlit-sortables>=0.3.1
