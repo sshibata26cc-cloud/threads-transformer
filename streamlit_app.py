@@ -22,6 +22,7 @@ from cloudinary_storage import (
     verify_image_url,
 )
 from instagram_api import InstagramAPIError, get_instagram_credentials, post_story
+from reply_filters import filter_own_replies
 from story_image import (
     DEFAULT_MAX_FONT_SIZE,
     DEFAULT_TEXT_BG_COLOR,
@@ -320,6 +321,11 @@ if convert_clicked:
                         own_replies = get_own_replies_in_order(
                             replies, post.get("username", selected_account)
                         )
+                        # Story・Carousel・note共通の除外ルール（告知文言・
+                        # Google Form/YouTubeリンクを含む本人返信を除外する）。
+                        # ここで1回フィルタするだけで、reply_textsを介して
+                        # 3機能すべてに反映される。時系列順はそのまま維持される。
+                        own_replies = filter_own_replies(own_replies)
 
                 if not post_summary:
                     st.session_state.result = None
