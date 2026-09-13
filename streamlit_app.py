@@ -617,8 +617,38 @@ elif result and result["mode"] == MODE_CAROUSEL:
 
     st.markdown('<div class="tt-step-title">カルーセルページ</div>', unsafe_allow_html=True)
 
-    # 選択中ページが何らかの理由でページ一覧から消えていたら、先頭ページへ戻す。
+    # --- 画像クリック／横スクロールによる選択変更を、JavaScriptからPython側へ
+    # 伝えるための非表示ウィジェット。見た目には一切現れない（CSSで
+    # 完全に非表示にしている。carousel_ui.pyのinject_carousel_card_css参照）。
+    # JS側は、この中のテキスト入力の値をページIDへ書き換えることで、
+    # Streamlitの通常の再実行フローに乗せてPython側へ伝える。
+    scroll_sync_key = f"carousel_scroll_sync_{reset_id}"
+    with st.container(key=scroll_sync_key):
+        synced_page_id = st.text_input(
+            "carousel_scroll_sync",
+            key=f"{scroll_sync_key}_input",
+            label_visibility="collapsed",
+        )
+
     page_ids = st.session_state.carousel_page_ids
+    # 非表示のテキスト入力は、JS側から新しい値を書き込まない限りその値を
+    # 保持し続ける（＝再実行のたびに同じ値を返し続ける）。そのため
+    # 「現在の選択と違うら常に上書きする」実装では、ページ追加・削除・
+    # Undo/Redoなどプログラム側で選択を変えた直後の再実行時に、この
+    # 古い値で選択が巻き戻ってしまう。前回処理した値からの「変化」を
+    # 検知したときだけ反映することで、この巻き戻りを防ぐ。
+    last_synced_value = st.session_state.get("carousel_last_scroll_sync_value")
+    if synced_page_id and synced_page_id != last_synced_value:
+        st.session_state.carousel_last_scroll_sync_value = synced_page_id
+        if synced_page_id in page_ids and synced_page_id != st.session_state.carousel_selected_id:
+            # 画像クリック／スクロール停止による選択変更。
+            # _carousel_content_signature()はselected_idを見ないため、この後の
+            # _push_carousel_history()は新しいUndo履歴を作らない
+            # （＝スクロールだけではUndo履歴を消費しない）。
+            st.session_state.carousel_selected_id = synced_page_id
+            st.session_state.carousel_force_editor_resync = True
+
+    # 選択中ページが何らかの理由でページ一覧から消えていたら、先頭ページへ戻す。
     if page_ids and st.session_state.carousel_selected_id not in page_ids:
         st.session_state.carousel_selected_id = page_ids[0]
     selected_id = st.session_state.carousel_selected_id
@@ -689,7 +719,9 @@ elif result and result["mode"] == MODE_CAROUSEL:
         )
 
     # Ctrl+Z/Ctrl+Y（Mac: Cmd+Z/Cmd+Shift+Z）でも、上と同じボタンを操作させる。
-    inject_carousel_shortcuts_js()
+    # 同じJavaScriptの中で、画像クリック／横スクロール停止による選択変更も
+    # 上のscroll_sync_key経由でPython側へ伝えている。
+    inject_carousel_shortcuts_js(scroll_sync_key)
 
     if add_page_clicked:
         # 「現在選択中のページの直後」へ新規ページを挿入する。
@@ -894,16 +926,10 @@ elif result and result["mode"] == MODE_CAROUSEL:
                     if page_image_bytes:
                         # 画像そのものの生成サイズは1080x1350のまま。
                         # 表示サイズだけをCSS（carousel_ui.py）で縮小・拡大する。
+                        # プレビュー画像自体をクリックすると、carousel_ui.pyの
+                        # JavaScript（inject_carousel_shortcuts_js）がそのページを
+                        # 選択状態にする。専用の選択ボタンは設けていない。
                         st.image(page_image_bytes, width=280)
-
-                    if not is_selected:
-                        if st.button(
-                            "このページを表示",
-                            key=f"carousel_select_{pid}",
-                            use_container_width=True,
-                        ):
-                            st.session_state.carousel_selected_id = pid
-                            st.rerun()
 
         # 選択中ページが変わったときに、そのカードを横スクロール領域の
         # 中央へ自動的にスクロールする（scroll-snapと組み合わせて使う）。

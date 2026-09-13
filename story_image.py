@@ -341,9 +341,20 @@ def generate_story_image(
             "画像が見づらい場合は、投稿を分けることをおすすめします。"
         )
 
+    # --- コンテンツ全体（アイコン＋アカウント名＋本文）の上下中央配置 ---
+    # 「最終的なフォントサイズを決める（自動縮小）→ その結果で高さを測る→
+    #  中央位置を計算する」という順序を守るため、この計算は必ず自動縮小
+    # ループより後（＝font_size・wrapped_blocks・total_heightが確定した後）
+    # に行う。ここより後でfont_sizeを変更してはならない。
+    content_total_height = header_height + SECTION_GAP + total_height
+    # 極端に文章量が多く自動縮小しても収まりきらない場合は、これまで通り
+    # 上（MARGIN_TOP）を基準にする（中央寄せしようとして上端がマージンより
+    # 上にはみ出さないようにするための安全策）。
+    start_y = max(MARGIN_TOP, (CANVAS_HEIGHT - content_total_height) // 2)
+
     # --- ヘッダー（プロフィール画像 + アカウント名） ---
     profile_circle = _fetch_circular_profile_image(profile_image_url, PROFILE_DIAMETER)
-    header_y = MARGIN_TOP
+    header_y = start_y
     if profile_circle:
         canvas.paste(profile_circle, (MARGIN_X, header_y), mask=profile_circle)
         name_x = MARGIN_X + PROFILE_DIAMETER + HEADER_GAP
@@ -358,7 +369,7 @@ def generate_story_image(
 
     # --- 本文・返信 ---
     line_height = int(font_size * LINE_HEIGHT_RATIO)
-    y = MARGIN_TOP + header_height + SECTION_GAP
+    y = start_y + header_height + SECTION_GAP
 
     for i, lines in enumerate(wrapped_blocks):
         for line in lines:
