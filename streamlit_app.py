@@ -12,6 +12,7 @@ from cloudinary_storage import (
 from instagram_api import InstagramAPIError, get_instagram_credentials, post_story
 from story_image import (
     DEFAULT_MAX_FONT_SIZE,
+    DEFAULT_TEXT_BG_COLOR,
     DEFAULT_TEXT_COLOR,
     StoryImageError,
     convert_png_to_jpeg,
@@ -33,6 +34,9 @@ from threads_api import (
 
 MODE_INSTAGRAM = "Instagram ストーリーズ 投稿用"
 MODE_NOTE = "note 投稿用"
+
+TEXT_BG_MODE_NONE = "透明"
+TEXT_BG_MODE_COLOR = "色を設定"
 
 ACCOUNT_CHOICES = ["shin.coaching", "takuma_o369", "masa_life128"]
 
@@ -218,6 +222,24 @@ if result and result["mode"] == MODE_INSTAGRAM:
             value=DEFAULT_TEXT_COLOR,
             key=f"story_color_{reset_id}",
         )
+
+        # 文字の背景色。初期状態は必ず「透明」（＝これまでと同じ見た目）。
+        text_bg_mode = st.radio(
+            "文字の背景",
+            (TEXT_BG_MODE_NONE, TEXT_BG_MODE_COLOR),
+            index=0,
+            horizontal=True,
+            key=f"story_text_bg_mode_{reset_id}",
+        )
+        if text_bg_mode == TEXT_BG_MODE_COLOR:
+            text_bg_color = st.color_picker(
+                "文字の背景色",
+                value=DEFAULT_TEXT_BG_COLOR,
+                key=f"story_text_bg_color_{reset_id}",
+            )
+        else:
+            text_bg_color = None
+
         font_size = st.slider(
             "文字サイズ",
             min_value=20,
@@ -254,6 +276,7 @@ if result and result["mode"] == MODE_INSTAGRAM:
                         own_replies=result["reply_texts"],
                         background_image=background_image,
                         text_color=text_color,
+                        text_bg_color=text_bg_color,
                         max_font_size=font_size,
                         overlay_opacity=overlay_percent / 100,
                     )

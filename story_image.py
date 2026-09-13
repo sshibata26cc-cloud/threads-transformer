@@ -5,7 +5,7 @@ Threadsの投稿内容から、Instagramストーリーズ用のPNG画像を生�
 文字量に応じてフォントサイズを自動的に小さくし、1080x1920pxの画像内に
 全文が収まるようにする。
 
-背景画像・文字色・文字サイズ（の上限）・背景の暗さは、
+背景画像・文字色・文字の背景色・文字サイズ（の上限）・背景の暗さは、
 呼び出し側（Streamlit画面）からユーザーが指定できる。
 
 同梱フォント: fonts/ipaexg.ttf（IPAexゴシック）
@@ -36,12 +36,20 @@ BLOCK_GAP = 40  # 本文と返信、返信同士の間
 NAME_FONT_SIZE = 42
 
 DEFAULT_TEXT_COLOR = "#1E1E1E"
+DEFAULT_TEXT_BG_COLOR = "#FFFFFF"  # 「色を設定」を選んだときのカラーピッカー初期値
 DEFAULT_MAX_FONT_SIZE = 44
 MIN_BODY_FONT_SIZE = 20
 FONT_STEP = 2
 MAX_OVERLAY_OPACITY = 0.8
 
 LINE_HEIGHT_RATIO = 1.55
+
+# 文字の背景色（文字の下に敷く帯）の余白・角丸の大きさ。
+# いずれもフォントサイズに対する比率で指定するため、
+# 文字サイズが自動調整されても見た目のバランスが崩れない。
+TEXT_BG_PAD_X_RATIO = 0.30
+TEXT_BG_PAD_Y_RATIO = 0.12
+TEXT_BG_RADIUS_RATIO = 0.22
 
 FONT_PATH = os.path.join(os.path.dirname(__file__), "fonts", "ipaexg.ttf")
 
@@ -209,6 +217,44 @@ def _measure_blocks(draw, blocks, font, max_width, line_height):
     return wrapped_blocks, total_height
 
 
+def _draw_text_backgrounds(draw, text_items, bg_rgb):
+    """
+    文字の背後に、指定された色の帯（角丸の長方形）を敷く。
+
+    text_itemsは (x, y, 行の文字列, フォント) のリストで、
+    実際に文字を描画するときとまったく同じ座標を受け取る。
+    そのため、この処理を行っても文字の位置・改行・余白・
+    自動文字サイズ調整には一切影響しない。
+
+    帯の高さはフォントの実際の高さ（ascent + descent）を基準にしており、
+    行間（フォントサイズ x LINE_HEIGHT_RATIO）より必ず小さくなるので、
+    上下の行の帯どうしが重なることはない。
+    """
+    for x, y, line, font in text_items:
+        if not line.strip():
+            continue  # 空行には帯を敷かない（改行の見た目はそのまま）
+
+        width = draw.textlength(line, font=font)
+        if width <= 0:
+            continue
+
+        ascent, descent = font.getmetrics()
+        pad_x = max(4, round(font.size * TEXT_BG_PAD_X_RATIO))
+        pad_y = max(2, round(font.size * TEXT_BG_PAD_Y_RATIO))
+        radius = max(2, round(font.size * TEXT_BG_RADIUS_RATIO))
+
+        draw.rounded_rectangle(
+            (
+                x - pad_x,
+                y - pad_y,
+                x + width + pad_x,
+                y + ascent + descent + pad_y,
+            ),
+            radius=radius,
+            fill=bg_rgb,
+        )
+
+
 def generate_story_image(
     profile_image_url,
     account_name,
@@ -216,6 +262,7 @@ def generate_story_image(
     own_replies,
     background_image=None,
     text_color=DEFAULT_TEXT_COLOR,
+    text_bg_color=None,
     max_font_size=DEFAULT_MAX_FONT_SIZE,
     overlay_opacity=0.0,
 ):
@@ -230,6 +277,9 @@ def generate_story_image(
         background_image: load_background_image()で読み込み済みのRGB画像、
                            またはNone（Noneの場合は白背景を使用）。
         text_color: 本文・アカウント名の文字色（"#RRGGBB"形式）。
+        text_bg_color: 文字の背景色（"#RRGGBB"形式）。
+                       None（既定値）の場合は文字背景を描画せず、
+                       これまでとまったく同じ見た目になる。
         max_font_size: ユーザーが希望する本文フォントサイズの上限。
         overlay_opacity: 背景画像の上に重ねる黒レイヤーの不透明度（0.0〜0.8）。
                          background_imageがNoneの場合は無視される。
@@ -249,6 +299,7 @@ def generate_story_image(
 
     draw = ImageDraw.Draw(canvas)
     text_rgb = _hex_to_rgb(text_color)
+    text_bg_rgb = _hex_to_rgb(text_bg_color) if text_bg_color else None
 
     max_width = CANVAS_WIDTH - MARGIN_X * 2
     name_font = _load_font(NAME_FONT_SIZE)
@@ -290,7 +341,10 @@ def generate_story_image(
         name_x = MARGIN_X
 
     name_y = header_y + (PROFILE_DIAMETER - NAME_FONT_SIZE) // 2
-    draw.text((name_x, name_y), account_name or "", font=name_font, fill=text_rgb)
+
+    # 文字の描画位置を先にすべて決めてから、
+    # 「背景の帯 → 文字」の順に描画する（帯が文字を覆わないようにするため）。
+    text_items = [(name_x, name_y, account_name or "", name_font)]
 
     # --- 本文・返信 ---
     line_height = int(font_size * LINE_HEIGHT_RATIO)
@@ -298,10 +352,16 @@ def generate_story_image(
 
     for i, lines in enumerate(wrapped_blocks):
         for line in lines:
-            draw.text((MARGIN_X, y), line, font=body_font, fill=text_rgb)
+            text_items.append((MARGIN_X, y, line, body_font))
             y += line_height
         if i < len(wrapped_blocks) - 1:
             y += BLOCK_GAP
+
+    if text_bg_rgb is not None:
+        _draw_text_backgrounds(draw, text_items, text_bg_rgb)
+
+    for item_x, item_y, line, item_font in text_items:
+        draw.text((item_x, item_y), line, font=item_font, fill=text_rgb)
 
     buffer = io.BytesIO()
     canvas.convert("RGB").save(buffer, format="PNG")
