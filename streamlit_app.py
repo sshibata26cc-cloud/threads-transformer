@@ -3,6 +3,8 @@ import hashlib
 import streamlit as st
 
 from app_meta import inject_mobile_meta_tags, resolve_page_icon
+from carousel_generator import generate_carousel_page_image
+from carousel_splitter import split_into_pages
 from cloudinary_storage import (
     CloudinaryError,
     delete_story_image,
@@ -33,12 +35,30 @@ from threads_api import (
 )
 
 MODE_INSTAGRAM = "Instagram ストーリーズ 投稿用"
+MODE_CAROUSEL = "Instagram カルーセル投稿用"
 MODE_NOTE = "note 投稿用"
 
 TEXT_BG_MODE_NONE = "透明"
 TEXT_BG_MODE_COLOR = "色を設定"
 
 ACCOUNT_CHOICES = ["shin.coaching", "takuma_o369", "masa_life128"]
+
+
+def _reset_carousel_pages(pages_text):
+    """
+    Threadsから新しく取得した内容をもとに、カルーセルのページ構成を作り直す。
+
+    各ページに一意のIDを振り、そのIDに対応するテキスト編集欄
+    （st.session_state["carousel_text_<id>"]）へ自動分割結果を書き込む。
+    IDは呼び出すたびに増え続けるカウンターから採番するため、
+    ページの追加・削除を繰り返しても他のページの編集欄と衝突しない。
+    """
+    start_id = st.session_state.carousel_id_seq
+    new_ids = list(range(start_id, start_id + len(pages_text)))
+    st.session_state.carousel_id_seq = start_id + len(pages_text)
+    st.session_state.carousel_page_ids = new_ids
+    for page_id, text in zip(new_ids, pages_text):
+        st.session_state[f"carousel_text_{page_id}"] = text
 
 st.set_page_config(
     page_title="Threads XC",
@@ -55,8 +75,8 @@ st.markdown(
         <div class="tt-brand">Threads Transformer</div>
         <div class="tt-tagline">Threadsの言葉を、次の場所へ。</div>
         <div class="tt-description">
-            Threadsの投稿を、Instagramストーリーズ用画像または<br>
-            note投稿用テキストに変換します。
+            Threadsの投稿を、Instagramストーリーズ用画像・<br>
+            カルーセル用画像・note投稿用テキストに変換します。
         </div>
     </div>
     """,
@@ -81,6 +101,10 @@ if "ig_post_error" not in st.session_state:
     st.session_state.ig_post_error = None
 if "ig_post_debug_info" not in st.session_state:
     st.session_state.ig_post_debug_info = None
+if "carousel_page_ids" not in st.session_state:
+    st.session_state.carousel_page_ids = []
+if "carousel_id_seq" not in st.session_state:
+    st.session_state.carousel_id_seq = 0
 
 st.markdown('<div class="tt-step-title">1. Threadsアカウントを選択</div>', unsafe_allow_html=True)
 with st.container(border=True):
@@ -94,7 +118,7 @@ st.markdown('<div class="tt-step-title">2. 変換先を選択</div>', unsafe_all
 with st.container(border=True):
     mode = st.radio(
         "変換したい形式を選んでください",
-        (MODE_INSTAGRAM, MODE_NOTE),
+        (MODE_INSTAGRAM, MODE_CAROUSEL, MODE_NOTE),
         label_visibility="collapsed",
     )
 
@@ -182,6 +206,9 @@ if convert_clicked:
                         else:
                             st.session_state.story_image_bytes = image_bytes
                             st.session_state.story_warning = warning
+                    elif mode == MODE_CAROUSEL:
+                        pages_text = split_into_pages(original_text, reply_texts)
+                        _reset_carousel_pages(pages_text)
                     else:
                         st.session_state.note_text = "\n\n".join(
                             [original_text] + reply_texts
@@ -425,6 +452,154 @@ if result and result["mode"] == MODE_INSTAGRAM:
                     # 確認ダイアログを画面から消し、結果メッセージだけを
                     # きれいに表示し直すために再実行する。
                     st.rerun()
+
+elif result and result["mode"] == MODE_CAROUSEL:
+    st.markdown('<div class="tt-step-title">カルーセルデザイン</div>', unsafe_allow_html=True)
+    with st.container(border=True):
+        reset_id = st.session_state.design_reset_id
+
+        carousel_bg_file = st.file_uploader(
+            "背景画像を選択（未指定の場合は白背景を使用します・全ページ共通）",
+            type=["png", "jpg", "jpeg", "webp"],
+            key=f"carousel_bg_{reset_id}",
+        )
+        carousel_overlay_percent = st.slider(
+            "背景の暗さ",
+            min_value=0,
+            max_value=80,
+            value=20,
+            step=5,
+            format="%d%%",
+            key=f"carousel_overlay_{reset_id}",
+        )
+        carousel_text_color = st.color_picker(
+            "文字色（全ページ共通）",
+            value=DEFAULT_TEXT_COLOR,
+            key=f"carousel_color_{reset_id}",
+        )
+
+        # 文字の背景色。Storyズ機能と同じ仕様（初期状態は必ず「透明」）。
+        carousel_text_bg_mode = st.radio(
+            "文字の背景",
+            (TEXT_BG_MODE_NONE, TEXT_BG_MODE_COLOR),
+            index=0,
+            horizontal=True,
+            key=f"carousel_text_bg_mode_{reset_id}",
+        )
+        if carousel_text_bg_mode == TEXT_BG_MODE_COLOR:
+            carousel_text_bg_color = st.color_picker(
+                "文字の背景色",
+                value=DEFAULT_TEXT_BG_COLOR,
+                key=f"carousel_text_bg_color_{reset_id}",
+            )
+        else:
+            carousel_text_bg_color = None
+
+        carousel_font_size = st.slider(
+            "文字サイズ（最大値・全ページ共通）",
+            min_value=20,
+            max_value=64,
+            value=DEFAULT_MAX_FONT_SIZE,
+            key=f"carousel_font_{reset_id}",
+        )
+
+    # 背景画像はページ数ぶん何度も読み込み直さないよう、ここで一度だけ読み込む。
+    carousel_background_image = None
+    carousel_bg_load_failed = False
+    if carousel_bg_file is not None:
+        try:
+            carousel_background_image = load_background_image(carousel_bg_file.getvalue())
+        except StoryImageError as e:
+            carousel_bg_load_failed = True
+            st.error(e.friendly_message)
+            with st.expander("デバッグ情報（エラー詳細）"):
+                st.write(e.detail or "詳細情報はありません。")
+
+    st.markdown('<div class="tt-step-title">カルーセルページ</div>', unsafe_allow_html=True)
+
+    page_ids = st.session_state.carousel_page_ids
+    total_pages = len(page_ids)
+
+    if not page_ids:
+        st.info("ページがありません。「ページを追加」から作成してください。")
+
+    page_id_to_delete = None
+
+    for index, page_id in enumerate(page_ids):
+        page_number = index + 1
+        text_key = f"carousel_text_{page_id}"
+        if text_key not in st.session_state:
+            st.session_state[text_key] = ""
+
+        with st.container(border=True):
+            st.markdown(
+                f'<div class="tt-step-title">ページ {page_number} / {total_pages}</div>',
+                unsafe_allow_html=True,
+            )
+
+            # Threads APIは呼ばず、編集済みのテキスト（session_state）から
+            # このページの画像だけをその場で再生成する。
+            current_text = st.session_state[text_key]
+
+            page_image_bytes = None
+            page_warning = None
+            if not carousel_bg_load_failed:
+                try:
+                    page_image_bytes, page_warning = generate_carousel_page_image(
+                        current_text,
+                        background_image=carousel_background_image,
+                        text_color=carousel_text_color,
+                        text_bg_color=carousel_text_bg_color,
+                        max_font_size=carousel_font_size,
+                        overlay_opacity=carousel_overlay_percent / 100,
+                    )
+                except StoryImageError as e:
+                    st.error(e.friendly_message)
+                    with st.expander("デバッグ情報（エラー詳細）"):
+                        st.write(e.detail or "詳細情報はありません。")
+
+            if page_image_bytes:
+                if page_warning:
+                    st.warning(page_warning)
+                st.image(page_image_bytes, use_container_width=True)
+                st.download_button(
+                    f"ページ{page_number}のPNGをダウンロード",
+                    data=page_image_bytes,
+                    file_name=f"threads_carousel_{page_number}.png",
+                    mime="image/png",
+                    use_container_width=True,
+                    key=f"carousel_download_{page_id}",
+                )
+
+            st.text_area(
+                f"ページ{page_number}の文章",
+                key=text_key,
+                height=180,
+            )
+
+            if st.button(
+                "このページを削除",
+                key=f"carousel_delete_{page_id}",
+                use_container_width=True,
+            ):
+                page_id_to_delete = page_id
+
+    # ループの外でページ一覧を更新することで、削除中にリストを
+    # 書き換えてしまう問題を避け、再実行後も削除結果を保持する。
+    if page_id_to_delete is not None:
+        st.session_state.carousel_page_ids = [
+            pid for pid in st.session_state.carousel_page_ids if pid != page_id_to_delete
+        ]
+        del st.session_state[f"carousel_text_{page_id_to_delete}"]
+        st.rerun()
+
+    st.write("")
+    if st.button("ページを追加", key="carousel_add_page", use_container_width=True):
+        new_id = st.session_state.carousel_id_seq
+        st.session_state.carousel_id_seq += 1
+        st.session_state.carousel_page_ids.append(new_id)
+        st.session_state[f"carousel_text_{new_id}"] = ""
+        st.rerun()
 
 elif result and result["mode"] == MODE_NOTE:
     st.markdown('<div class="tt-step-title">note投稿用テキスト</div>', unsafe_allow_html=True)
