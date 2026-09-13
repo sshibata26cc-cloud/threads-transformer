@@ -14,6 +14,7 @@ import io
 
 from PIL import Image, ImageDraw
 
+from app_fonts import DEFAULT_FONT_KEY
 from story_image import (
     BACKGROUND_COLOR,
     DEFAULT_MAX_FONT_SIZE,
@@ -45,6 +46,7 @@ def generate_carousel_page_image(
     text_bg_color=None,
     max_font_size=DEFAULT_MAX_FONT_SIZE,
     overlay_opacity=0.0,
+    font_key=DEFAULT_FONT_KEY,
 ):
     """
     カルーセルの1ページ分（1080x1350）のPNG画像を生成する。
@@ -62,6 +64,7 @@ def generate_carousel_page_image(
         max_font_size: ユーザーが希望するフォントサイズの上限。
         overlay_opacity: 背景画像の上に重ねる黒レイヤーの不透明度（0.0〜0.8）。
                          background_imageがNoneの場合は無視される。
+        font_key: app_fonts.FONT_OPTIONSのいずれか（全ページ共通の1つを想定）。
 
     戻り値: (PNGのバイト列, 警告メッセージ または None)
     """
@@ -84,14 +87,14 @@ def generate_carousel_page_image(
     available_height = CAROUSEL_HEIGHT - CAROUSEL_MARGIN_Y * 2
 
     font_size = max(MIN_BODY_FONT_SIZE, max_font_size or DEFAULT_MAX_FONT_SIZE)
-    body_font = _load_font(font_size)
+    body_font = _load_font(font_size, font_key=font_key, sample_text=text)
     lines = _wrap_text_block(draw, text or "", body_font, max_width)
     line_height = int(font_size * LINE_HEIGHT_RATIO)
     total_height = len(lines) * line_height
 
     while total_height > available_height and font_size > MIN_BODY_FONT_SIZE:
         font_size -= FONT_STEP
-        body_font = _load_font(font_size)
+        body_font = _load_font(font_size, font_key=font_key, sample_text=text)
         lines = _wrap_text_block(draw, text or "", body_font, max_width)
         line_height = int(font_size * LINE_HEIGHT_RATIO)
         total_height = len(lines) * line_height

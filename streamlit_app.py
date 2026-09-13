@@ -4,6 +4,7 @@ import uuid
 import streamlit as st
 from streamlit_sortables import sort_items
 
+from app_fonts import DEFAULT_FONT_KEY, FONT_OPTIONS
 from app_meta import inject_mobile_meta_tags, resolve_page_icon
 from carousel_generator import generate_carousel_page_image
 from carousel_splitter import split_into_pages
@@ -71,6 +72,7 @@ def _new_carousel_page_id() -> str:
 def _default_carousel_design():
     """カルーセルデザイン設定の初期値（＝これまでの既定値と同じ）。"""
     return {
+        "font_choice": DEFAULT_FONT_KEY,
         "font_size": DEFAULT_MAX_FONT_SIZE,
         "text_color": DEFAULT_TEXT_COLOR,
         "overlay_percent": 20,
@@ -82,6 +84,7 @@ def _default_carousel_design():
 def _carousel_design_keys(reset_id):
     """カルーセルのデザイン設定項目名と、対応するwidget keyの対応表。"""
     return {
+        "font_choice": f"carousel_font_choice_{reset_id}",
         "font_size": f"carousel_font_{reset_id}",
         "text_color": f"carousel_color_{reset_id}",
         "overlay_percent": f"carousel_overlay_{reset_id}",
@@ -231,10 +234,6 @@ st.markdown(
 
 if "result" not in st.session_state:
     st.session_state.result = None
-if "story_image_bytes" not in st.session_state:
-    st.session_state.story_image_bytes = None
-if "story_warning" not in st.session_state:
-    st.session_state.story_warning = None
 if "design_reset_id" not in st.session_state:
     st.session_state.design_reset_id = 0
 if "ig_post_confirm_pending" not in st.session_state:
@@ -348,22 +347,10 @@ if convert_clicked:
                     st.session_state.ig_post_confirm_pending = False
 
                     if mode == MODE_INSTAGRAM:
-                        try:
-                            image_bytes, warning = generate_story_image(
-                                profile_image_url=profile_image_url,
-                                account_name=account_name,
-                                original_text=original_text,
-                                own_replies=reply_texts,
-                            )
-                        except StoryImageError as e:
-                            st.session_state.story_image_bytes = None
-                            st.session_state.story_warning = None
-                            st.error(e.friendly_message)
-                            with st.expander("デバッグ情報（エラー詳細）"):
-                                st.write(e.detail or "詳細情報はありません。")
-                        else:
-                            st.session_state.story_image_bytes = image_bytes
-                            st.session_state.story_warning = warning
+                        # Story画像は下の「ストーリーズデザイン」欄で、現在の
+                        # デザイン設定（初期値）から即座にリアルタイム生成される
+                        # ため、ここで改めて生成する必要はない。
+                        pass
                     elif mode == MODE_CAROUSEL:
                         pages_text = split_into_pages(original_text, reply_texts)
                         _reset_carousel_pages(pages_text)
@@ -402,6 +389,19 @@ if result and result["mode"] == MODE_INSTAGRAM:
             format="%d%%",
             key=f"story_overlay_{reset_id}",
         )
+        story_font_choice = st.selectbox(
+            "フォント",
+            FONT_OPTIONS,
+            index=FONT_OPTIONS.index(DEFAULT_FONT_KEY),
+            key=f"story_font_choice_{reset_id}",
+        )
+        font_size = st.slider(
+            "文字サイズ",
+            min_value=20,
+            max_value=64,
+            value=DEFAULT_MAX_FONT_SIZE,
+            key=f"story_font_{reset_id}",
+        )
         text_color = st.color_picker(
             "文字色",
             value=DEFAULT_TEXT_COLOR,
@@ -425,68 +425,56 @@ if result and result["mode"] == MODE_INSTAGRAM:
         else:
             text_bg_color = None
 
-        font_size = st.slider(
-            "文字サイズ",
-            min_value=20,
-            max_value=64,
-            value=DEFAULT_MAX_FONT_SIZE,
-            key=f"story_font_{reset_id}",
+    # 背景画像はここで一度だけ読み込む。
+    background_image = None
+    if bg_file is not None:
+        try:
+            background_image = load_background_image(bg_file.getvalue())
+        except StoryImageError as e:
+            st.error(e.friendly_message)
+            with st.expander("デバッグ情報（エラー詳細）"):
+                st.write(e.detail or "詳細情報はありません。")
+
+    # 「プレビューを更新」ボタンは使わず、上のデザイン設定（背景画像・背景の
+    # 暗さ・フォント・文字サイズ・文字色・文字の背景）を変更するたびに、
+    # Streamlitのwidget再実行の仕組みを利用して、現在の入力値からその場で
+    # Story画像を再生成する。Threads APIは呼ばず、ローカルのPillow処理のみ。
+    current_image_bytes = None
+    current_warning = None
+    try:
+        current_image_bytes, current_warning = generate_story_image(
+            profile_image_url=result["profile_image_url"],
+            account_name=result["account_name"],
+            original_text=result["original_text"],
+            own_replies=result["reply_texts"],
+            background_image=background_image,
+            text_color=text_color,
+            text_bg_color=text_bg_color,
+            max_font_size=font_size,
+            overlay_opacity=overlay_percent / 100,
+            font_key=story_font_choice,
         )
-        preview_clicked = st.button(
-            "プレビューを更新",
-            key=f"story_preview_btn_{reset_id}",
-            use_container_width=True,
-        )
+    except StoryImageError as e:
+        st.error(e.friendly_message)
+        with st.expander("デバッグ情報（エラー詳細）"):
+            st.write(e.detail or "詳細情報はありません。")
 
-    if preview_clicked:
-        background_image = None
-        bg_load_failed = False
-
-        if bg_file is not None:
-            try:
-                background_image = load_background_image(bg_file.getvalue())
-            except StoryImageError as e:
-                bg_load_failed = True
-                st.error(e.friendly_message)
-                with st.expander("デバッグ情報（エラー詳細）"):
-                    st.write(e.detail or "詳細情報はありません。")
-
-        if not bg_load_failed:
-            try:
-                with st.spinner("プレビューを生成しています..."):
-                    image_bytes, warning = generate_story_image(
-                        profile_image_url=result["profile_image_url"],
-                        account_name=result["account_name"],
-                        original_text=result["original_text"],
-                        own_replies=result["reply_texts"],
-                        background_image=background_image,
-                        text_color=text_color,
-                        text_bg_color=text_bg_color,
-                        max_font_size=font_size,
-                        overlay_opacity=overlay_percent / 100,
-                    )
-            except StoryImageError as e:
-                st.error(e.friendly_message)
-                with st.expander("デバッグ情報（エラー詳細）"):
-                    st.write(e.detail or "詳細情報はありません。")
-            else:
-                st.session_state.story_image_bytes = image_bytes
-                st.session_state.story_warning = warning
-
-    if st.session_state.story_image_bytes:
-        if st.session_state.story_warning:
-            st.warning(st.session_state.story_warning)
+    if current_image_bytes:
+        if current_warning:
+            st.warning(current_warning)
         st.markdown('<div class="tt-step-title">プレビュー</div>', unsafe_allow_html=True)
-        st.image(st.session_state.story_image_bytes, use_container_width=True)
+        st.image(current_image_bytes, use_container_width=True)
         st.download_button(
             "PNGをダウンロード",
-            data=st.session_state.story_image_bytes,
+            data=current_image_bytes,
             file_name="threads_story.png",
             mime="image/png",
             use_container_width=True,
         )
 
-        current_image_bytes = st.session_state.story_image_bytes
+        # Instagramへの投稿にも、常にこの（現在の設定から今まさに生成した）
+        # current_image_bytesを使う。古いsession_stateの画像を誤って
+        # 投稿してしまうことがないようにするため。
         current_image_hash = hashlib.sha256(current_image_bytes).hexdigest()
         already_posted = st.session_state.last_posted_image_hash == current_image_hash
 
@@ -789,6 +777,23 @@ elif result and result["mode"] == MODE_CAROUSEL:
             key=overlay_key,
         )
 
+        font_choice_key = f"carousel_font_choice_{reset_id}"
+        if font_choice_key not in st.session_state:
+            st.session_state[font_choice_key] = DEFAULT_FONT_KEY
+        carousel_font_choice = st.selectbox(
+            "フォント（全ページ共通）", FONT_OPTIONS, key=font_choice_key
+        )
+
+        font_size_key = f"carousel_font_{reset_id}"
+        if font_size_key not in st.session_state:
+            st.session_state[font_size_key] = DEFAULT_MAX_FONT_SIZE
+        carousel_font_size = st.slider(
+            "文字サイズ（最大値・全ページ共通）",
+            min_value=20,
+            max_value=64,
+            key=font_size_key,
+        )
+
         color_key = f"carousel_color_{reset_id}"
         if color_key not in st.session_state:
             st.session_state[color_key] = DEFAULT_TEXT_COLOR
@@ -812,16 +817,6 @@ elif result and result["mode"] == MODE_CAROUSEL:
         else:
             carousel_text_bg_color = None
 
-        font_key = f"carousel_font_{reset_id}"
-        if font_key not in st.session_state:
-            st.session_state[font_key] = DEFAULT_MAX_FONT_SIZE
-        carousel_font_size = st.slider(
-            "文字サイズ（最大値・全ページ共通）",
-            min_value=20,
-            max_value=64,
-            key=font_key,
-        )
-
     # 背景画像はページ数ぶん何度も読み込み直さないよう、ここで一度だけ読み込む。
     # 読み込みに失敗した場合はエラーを表示しつつ、背景なし（白背景）で
     # 各ページのプレビューは表示を続ける。
@@ -842,6 +837,7 @@ elif result and result["mode"] == MODE_CAROUSEL:
             text_bg_color=carousel_text_bg_color,
             max_font_size=carousel_font_size,
             overlay_opacity=carousel_overlay_percent / 100,
+            font_key=carousel_font_choice,
         )
 
     # ここまでのボタン操作でページ構成が変わっていないことが確定した状態で描画する。

@@ -5,19 +5,20 @@ Threadsの投稿内容から、Instagramストーリーズ用のPNG画像を生�
 文字量に応じてフォントサイズを自動的に小さくし、1080x1920pxの画像内に
 全文が収まるようにする。
 
-背景画像・文字色・文字の背景色・文字サイズ（の上限）・背景の暗さは、
+背景画像・文字色・文字の背景色・文字サイズ（の上限）・背景の暗さ・フォントは、
 呼び出し側（Streamlit画面）からユーザーが指定できる。
 
-同梱フォント: fonts/ipaexg.ttf（IPAexゴシック）
-ライセンス: fonts/IPA_Font_License_Agreement_v1.0.txt を参照。
+フォントの選択肢・同梱フォントファイル・ライセンスについては
+app_fonts.py と fonts/FONTS_NOTICE.txt を参照。
 """
 
 import io
-import os
 import re
 
 import requests
 from PIL import Image, ImageDraw, ImageFont, ImageOps
+
+from app_fonts import DEFAULT_FONT_KEY, get_font
 
 CANVAS_WIDTH = 1080
 CANVAS_HEIGHT = 1920
@@ -51,9 +52,6 @@ TEXT_BG_PAD_X_RATIO = 0.30
 TEXT_BG_PAD_Y_RATIO = 0.12
 TEXT_BG_RADIUS_RATIO = 0.22
 
-FONT_PATH = os.path.join(os.path.dirname(__file__), "fonts", "ipaexg.ttf")
-
-
 class StoryImageError(Exception):
     """ストーリーズ画像の生成中に発生したエラー。"""
 
@@ -63,9 +61,14 @@ class StoryImageError(Exception):
         self.detail = detail
 
 
-def _load_font(size: int) -> ImageFont.FreeTypeFont:
+def _load_font(size: int, font_key: str = DEFAULT_FONT_KEY, sample_text: str = "") -> ImageFont.FreeTypeFont:
+    """
+    フォントを読み込む。実際のフォント選択肢・ファイルの対応はapp_fonts.pyに
+    集約されており、Story・Carouselの両方からこの関数（または
+    app_fonts.get_font）経由で同じ実装を利用する。
+    """
     try:
-        return ImageFont.truetype(FONT_PATH, size)
+        return get_font(font_key, size, sample_text=sample_text)
     except OSError as e:
         raise StoryImageError(
             "画像生成用のフォントファイルを読み込めませんでした。",
@@ -265,6 +268,7 @@ def generate_story_image(
     text_bg_color=None,
     max_font_size=DEFAULT_MAX_FONT_SIZE,
     overlay_opacity=0.0,
+    font_key=DEFAULT_FONT_KEY,
 ):
     """
     Threadsの投稿内容から1080x1920のInstagramストーリーズ用PNG画像を生成する。
@@ -283,6 +287,8 @@ def generate_story_image(
         max_font_size: ユーザーが希望する本文フォントサイズの上限。
         overlay_opacity: 背景画像の上に重ねる黒レイヤーの不透明度（0.0〜0.8）。
                          background_imageがNoneの場合は無視される。
+        font_key: app_fonts.FONT_OPTIONSのいずれか。本文・アカウント名の
+                  両方に適用する（現状どちらも同じフォントを使っているため）。
 
     戻り値: (PNGのバイト列, 警告メッセージ または None)
     """
@@ -302,24 +308,28 @@ def generate_story_image(
     text_bg_rgb = _hex_to_rgb(text_bg_color) if text_bg_color else None
 
     max_width = CANVAS_WIDTH - MARGIN_X * 2
-    name_font = _load_font(NAME_FONT_SIZE)
+
+    blocks = [original_text or ""] + [r or "" for r in own_replies]
+    # 「Arial」選択時に日本語が含まれるかどうかの判定用。
+    # アカウント名も本文もまとめて渡し、どちらかに日本語が含まれていれば
+    # 日本語対応フォントへ自動的に切り替える。
+    sample_text = (account_name or "") + "".join(blocks)
+    name_font = _load_font(NAME_FONT_SIZE, font_key=font_key, sample_text=sample_text)
 
     header_height = max(PROFILE_DIAMETER, NAME_FONT_SIZE + 10)
     available_height = (
         CANVAS_HEIGHT - MARGIN_TOP - MARGIN_BOTTOM - header_height - SECTION_GAP
     )
 
-    blocks = [original_text or ""] + [r or "" for r in own_replies]
-
     font_size = max(MIN_BODY_FONT_SIZE, max_font_size or DEFAULT_MAX_FONT_SIZE)
-    body_font = _load_font(font_size)
+    body_font = _load_font(font_size, font_key=font_key, sample_text=sample_text)
     wrapped_blocks, total_height = _measure_blocks(
         draw, blocks, body_font, max_width, int(font_size * LINE_HEIGHT_RATIO)
     )
 
     while total_height > available_height and font_size > MIN_BODY_FONT_SIZE:
         font_size -= FONT_STEP
-        body_font = _load_font(font_size)
+        body_font = _load_font(font_size, font_key=font_key, sample_text=sample_text)
         wrapped_blocks, total_height = _measure_blocks(
             draw, blocks, body_font, max_width, int(font_size * LINE_HEIGHT_RATIO)
         )
