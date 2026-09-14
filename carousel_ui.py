@@ -100,9 +100,10 @@ def inject_carousel_card_css(selected_page_id):
         @media (max-width: 600px) {{
             [class*="st-key-carousel_card_"] img {{ width: {_CARD_WIDTH_MOBILE} !important; }}
         }}
-        /* クリックによる選択結果をPythonへ伝えるための、完全に非表示の
-           同期ウィジェット。 */
-        [class*="st-key-carousel_scroll_sync_"] {{
+        /* クリックによる選択結果・ドラッグによる並び替え結果をPythonへ
+           伝えるための、完全に非表示の同期ウィジェット。 */
+        [class*="st-key-carousel_scroll_sync_"],
+        [class*="st-key-carousel_reorder_sync_"] {{
             display: none !important;
         }}
         </style>
@@ -113,20 +114,30 @@ def inject_carousel_card_css(selected_page_id):
 
 def inject_carousel_scroll_restore_js():
     """
-    直前の横スクロール位置（inject_carousel_shortcuts_js側の
-    captureScrollIntent()が、カードや操作パネルのボタンをクリックした
-    “その瞬間”にsessionStorageへ記録しておいた値）を、今回の再描画に
-    合わせて復元する。
+    今回の再描画の最後に、以下2つをまとめて行う（iframe生成のコストを
+    抑えるため、1回のcomponents.html呼び出しにまとめている）。
 
-    Streamlitは再実行のたびにカルーセル領域のDOMを作り直すことがあり、
-    その際にブラウザ側の横スクロール位置が一時的に0へ戻ってしまうことが
-    ある。ページ選択（クリック）・ページの追加／削除／前後移動／元に戻す／
-    やり直すのいずれの操作の後でも、ユーザーが見ていた横スクロール位置を
-    できる限りそのまま維持するため、毎回の描画の最後にこの関数を呼ぶ。
+    1. 直前の横スクロール位置（inject_carousel_shortcuts_js側の
+       captureScrollIntent()が、カードや操作パネルのボタンをクリック／
+       ドラッグ操作を始めた“その瞬間”にsessionStorageへ記録しておいた値）
+       を復元する。
+       Streamlitは再実行のたびにカルーセル領域のDOMを作り直すことがあり、
+       その際にブラウザ側の横スクロール位置が一時的に0へ戻ってしまうことが
+       ある。ページ選択（クリック）・並び替え（ドラッグ／前後移動ボタン）・
+       ページの追加／削除／元に戻す／やり直すのいずれの操作の後でも、
+       ユーザーが見ていた横スクロール位置をできる限りそのまま維持する。
 
-    記録された値は1回使ったら必ず消す。消さずに残しておくと、今回の
-    操作と無関係な次回以降の再実行（例: 本文の編集や、他のデザイン設定の
-    変更）でも、古いスクロール位置へ意図せず引き戻されてしまうため。
+       記録された値は1回使ったら必ず消す。消さずに残しておくと、今回の
+       操作と無関係な次回以降の再実行（例: 本文の編集や、他のデザイン設定の
+       変更）でも、古いスクロール位置へ意図せず引き戻されてしまうため。
+
+    2. 各カードへdraggable属性を付け直す（カード自体をドラッグして
+       並び替えられるようにする）。Streamlitは再実行のたびにカードの
+       DOM要素を新しく作り直すため、Python側からdraggable属性を直接
+       指定する手段が無いこの構成では、描画のたびにJavaScript側で
+       付け直す必要がある。カード内の<img>は既定でブラウザ標準の
+       画像ドラッグ（保存・別タブへのドラッグ等）ができてしまうため、
+       カード全体のドラッグと競合しないようimg側は明示的に無効化する。
 
     「一度だけ登録するイベントリスナー」ではなく「今回の描画1回だけ行いたい
     動作」なので、iframe内から直接window.parent上で実行してよい。
@@ -135,6 +146,19 @@ def inject_carousel_scroll_restore_js():
     <script>
     (function () {
         try {
+            var doc = window.parent.document;
+
+            var cards = doc.querySelectorAll('[class*="st-key-carousel_card_"]');
+            cards.forEach(function (card) {
+                if (!card.draggable) {
+                    card.draggable = true;
+                }
+                var img = card.querySelector('img');
+                if (img && img.draggable) {
+                    img.draggable = false;
+                }
+            });
+
             var saved = null;
             try {
                 saved = sessionStorage.getItem('ttCarouselScrollIntent');
@@ -145,7 +169,6 @@ def inject_carousel_scroll_restore_js():
             if (saved === null) {
                 return;
             }
-            var doc = window.parent.document;
             var target = parseInt(saved, 10) || 0;
 
             // Streamlitは再実行後のDOM更新を複数回に分けて反映することがあり、
@@ -173,9 +196,9 @@ def inject_carousel_scroll_restore_js():
     components.html(html, height=0)
 
 
-def inject_carousel_shortcuts_js(scroll_sync_key: str = None):
+def inject_carousel_shortcuts_js(scroll_sync_key: str = None, reorder_sync_key: str = None):
     """
-    以下2つの操作を実現する、ごく小さなJavaScriptを埋め込む。
+    以下3つの操作を実現する、ごく小さなJavaScriptを埋め込む。
 
     1. Ctrl+Z / Ctrl+Y（Mac: Cmd+Z / Cmd+Shift+Z）を検知し、
        画面上の「↶ 元に戻す」「やり直す ↷」ボタンをクリックする。
@@ -183,9 +206,20 @@ def inject_carousel_shortcuts_js(scroll_sync_key: str = None):
        二重にUndoが走らないようにする。
     2. カード（プレビュー画像）をクリックしたら、そのページを選択状態にする。
        横スクロールだけでは選択は変わらない。
+    3. カードをクリック＋ドラッグしたら、ドロップした位置へページを
+       並び替える。HTML5標準のドラッグ＆ドロップ（draggable属性 +
+       dragstart/dragover/drop イベント）だけを使い、外部ライブラリや
+       独自のmousemove追跡は使わない。ブラウザが「単純なクリック」と
+       「実際に一定距離動いたドラッグ」を自動的に区別してくれるため、
+       ドラッグ終了時に誤ってclick（＝選択変更）が発火することもない。
+       ドラッグ中はブラウザ内だけで処理し、Python側には一切イベントを
+       送らない。ドロップが確定した瞬間に、新しいページ順を1回だけ
+       まとめて送信する（mousemove等のたびに送ることはしない）。
 
-    2で選択されたページIDは、非表示のst.text_input（scroll_sync_key）の
-    値を書き換えることでPython側（st.session_state）へ伝える。
+    2の選択結果は非表示のst.text_input（scroll_sync_key）へ、
+    3の並び替え結果は別の非表示のst.text_input（reorder_sync_key、
+    ページIDの配列をJSON文字列にしたもの）へ、それぞれ値を書き換える
+    ことでPython側（st.session_state）へ伝える。
 
     StreamlitはHTMLコンポーネントを再実行のたびに新しいiframeを描画し、
     古いiframeは（DOMからは消えても）その場ですぐには破棄されないことがある。
@@ -268,6 +302,16 @@ def inject_carousel_shortcuts_js(scroll_sync_key: str = None):
             }
         }
 
+        // --- ドラッグ並び替え結果をPython（非表示ウィジェット）へ伝える ---
+        // orderは並び替え後の全ページIDの配列。JSON文字列にして送る。
+        function reportReorder(order) {
+            var input = document.querySelector(__REORDER_SYNC_INPUT_SELECTOR__);
+            var payload = JSON.stringify(order);
+            if (input && input.value !== payload) {
+                setNativeInputValue(input, payload);
+            }
+        }
+
         function pageIdFromCard(card) {
             if (!card || !card.classList) {
                 return null;
@@ -303,12 +347,116 @@ def inject_carousel_shortcuts_js(scroll_sync_key: str = None):
             }
         }
 
+        // --- カードのドラッグ＆ドロップによる並び替え ---
+        // HTML5標準のドラッグ＆ドロップ（inject_carousel_scroll_restore_js側で
+        // 各カードにdraggable=trueを設定している）だけを使う。dragstartは
+        // 実際に一定距離ポインタが動いたときだけブラウザが発火させるため、
+        // 単純なクリックとは自然に区別され、ドラッグ終了後に誤ってclickが
+        // 発火した場合でも、下のclickハンドラ側でjustDraggedフラグにより
+        // 選択変更として扱わないようにしている。
+        // ドラッグ中（dragover）はブラウザ内の見た目の追跡だけを行い、
+        // Python側には一切送信しない。ドロップが確定した瞬間（drop）に、
+        // 新しいページ順を1回だけまとめて送信する。
+        var dragState = null;
+        var justDragged = false;
+
+        document.addEventListener('dragstart', function (e) {
+            var card = e.target.closest('[class*="st-key-carousel_card_"]');
+            if (!card) {
+                return;
+            }
+            var pid = pageIdFromCard(card);
+            if (!pid) {
+                return;
+            }
+            dragState = { pid: pid };
+            try {
+                e.dataTransfer.effectAllowed = 'move';
+                e.dataTransfer.setData('text/plain', pid);
+            } catch (err) {
+                // dataTransferを設定できないブラウザでも、dragState側の
+                // 追跡だけで並び替え自体は成立する。
+            }
+        });
+
+        document.addEventListener('dragover', function (e) {
+            if (!dragState) {
+                return;
+            }
+            var card = e.target.closest('[class*="st-key-carousel_card_"]');
+            if (!card) {
+                return;
+            }
+            // ドロップを受け付けるために既定動作を止める（HTML5 DnDの仕様）。
+            // ここでは見た目の変更やPythonへの送信は一切行わない。
+            e.preventDefault();
+            try {
+                e.dataTransfer.dropEffect = 'move';
+            } catch (err) {
+                // 何もしない。
+            }
+        });
+
+        document.addEventListener('drop', function (e) {
+            if (!dragState) {
+                return;
+            }
+            var card = e.target.closest('[class*="st-key-carousel_card_"]');
+            if (card) {
+                e.preventDefault();
+                var targetPid = pageIdFromCard(card);
+                var row = document.querySelector('.st-key-carousel_thumb_row');
+                if (targetPid && row && targetPid !== dragState.pid) {
+                    var order = [];
+                    row.querySelectorAll('[class*="st-key-carousel_card_"]').forEach(function (c) {
+                        var p = pageIdFromCard(c);
+                        if (p) {
+                            order.push(p);
+                        }
+                    });
+                    var fromIdx = order.indexOf(dragState.pid);
+                    var toIdx = order.indexOf(targetPid);
+                    if (fromIdx !== -1 && toIdx !== -1) {
+                        // ドラッグしたページを取り除き、ドロップ先の位置へ
+                        // 挿入する（例: [1,2,3,4,5]で5を3の位置へドロップ
+                        // すると [1,2,5,3,4] になる）。
+                        var moved = order.splice(fromIdx, 1)[0];
+                        order.splice(toIdx, 0, moved);
+                        captureScrollIntent();
+                        reportReorder(order);
+                    }
+                }
+            }
+            // このドロップ操作の直後、ブラウザによってはclickイベントが
+            // 続けて発火することがあるため、ごく短い間だけ選択変更として
+            // 扱わないようにする。「次に起きるclickを1回だけ無視する」の
+            // ではなく短い時間で自動的に元へ戻すのは、ここでclickが一切
+            // 発火しないまま（＝ブラウザの標準的な挙動）別の全く無関係な
+            // クリックが後で行われた場合に、それまで誤って無視され続けて
+            // しまうのを防ぐため。
+            justDragged = true;
+            dragState = null;
+            setTimeout(function () {
+                justDragged = false;
+            }, 300);
+        });
+
+        document.addEventListener('dragend', function () {
+            dragState = null;
+        });
+
         // --- カード（プレビュー画像）のクリックだけで選択する ---
         // 横スクロール自体はブラウザ標準の挙動（overflow-x: auto）に任せて
         // おり、ここでは独自のドラッグ処理・スクロール監視は一切行わない。
         // そのため、ここでの「クリック」はドラッグと衝突する心配がなく、
         // 単純なclickイベントだけで選択判定できる。
         document.addEventListener('click', function (e) {
+            // 直前がドラッグ＆ドロップの完了（またはドロップ失敗での終了）
+            // だった場合、そのクリックは選択変更として扱わない。
+            if (justDragged) {
+                justDragged = false;
+                return;
+            }
             var card = e.target.closest('[class*="st-key-carousel_card_"]');
             if (card) {
                 captureScrollIntent();
@@ -327,14 +475,24 @@ def inject_carousel_shortcuts_js(scroll_sync_key: str = None):
     """
     inner_js = inner_js.replace("__UNDO_LABEL__", json.dumps(UNDO_BUTTON_LABEL))
     inner_js = inner_js.replace("__REDO_LABEL__", json.dumps(REDO_BUTTON_LABEL))
-    # scroll_sync_keyが渡されなかった場合（呼び出し側が更新される前の一時的な
-    # 不整合など）でも、存在しない要素を安全に指すセレクタにしておく。
-    # querySelectorはnullを返すだけなので、クリック同期機能だけが静かに
-    # 無効化され、Ctrl+Z/Ctrl+Yのショートカット機能はこの後も維持される。
+    # scroll_sync_key / reorder_sync_keyが渡されなかった場合（呼び出し側が
+    # 更新される前の一時的な不整合など）でも、存在しない要素を安全に指す
+    # セレクタにしておく。querySelectorはnullを返すだけなので、該当する
+    # 同期機能だけが静かに無効化され、Ctrl+Z/Ctrl+Yのショートカット機能は
+    # この後も維持される。
     sync_selector = f".st-key-{scroll_sync_key} input" if scroll_sync_key else "[data-tt-carousel-sync-unavailable]"
     inner_js = inner_js.replace(
         "__SYNC_INPUT_SELECTOR__",
         json.dumps(sync_selector),
+    )
+    reorder_selector = (
+        f".st-key-{reorder_sync_key} input"
+        if reorder_sync_key
+        else "[data-tt-carousel-reorder-unavailable]"
+    )
+    inner_js = inner_js.replace(
+        "__REORDER_SYNC_INPUT_SELECTOR__",
+        json.dumps(reorder_selector),
     )
 
     outer_html = """

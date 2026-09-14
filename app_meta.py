@@ -13,6 +13,7 @@ assets/icon.png や assets/apple-touch-icon.png が存在しない場合でも�
 """
 
 import base64
+import functools
 import os
 
 import streamlit.components.v1 as components
@@ -38,10 +39,15 @@ def resolve_page_icon():
     return DEFAULT_PAGE_ICON
 
 
+@functools.lru_cache(maxsize=1)
 def _load_apple_touch_icon_data_uri():
     """
     assets/apple-touch-icon.png をBase64のdata URIとして読み込む。
     ファイルが存在しない・読み込めない場合はNoneを返す。
+
+    inject_mobile_meta_tags()はアプリの再実行のたびに毎回呼ばれるため、
+    ファイル自体は起動後に変わらないこの読み込み・Base64エンコード処理を
+    プロセス内で1回だけ行うようキャッシュする。
     """
     if not os.path.isfile(APPLE_TOUCH_ICON_PATH):
         return None

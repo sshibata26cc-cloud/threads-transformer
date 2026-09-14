@@ -16,6 +16,7 @@ import io
 import re
 
 import requests
+import streamlit as st
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from app_fonts import DEFAULT_FONT_KEY, get_font
@@ -137,8 +138,17 @@ def _cover_resize(image: Image.Image, target_w: int, target_h: int) -> Image.Ima
     return resized.crop((left, top, left + target_w, top + target_h))
 
 
+@st.cache_data(show_spinner=False, max_entries=10)
 def _fetch_circular_profile_image(url, diameter: int):
-    """プロフィール画像を取得し円形に切り抜く。取得できない場合はNoneを返す。"""
+    """
+    プロフィール画像を取得し円形に切り抜く。取得できない場合はNoneを返す。
+
+    プロフィール画像はThreadsアカウントを変換し直すまで変わらないが、
+    文字サイズ・フォント・背景の暗さなど他のデザイン設定を変えるたびに
+    Story画像全体が再生成され、そのたびにこの関数も呼ばれてしまう。
+    (url, diameter)だけで結果が一意に決まる純粋な処理なので、
+    ネットワーク取得を毎回繰り返さないようキャッシュする。
+    """
     if not url:
         return None
     try:

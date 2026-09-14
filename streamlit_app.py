@@ -1,4 +1,5 @@
 import hashlib
+import json
 import uuid
 
 import streamlit as st
@@ -56,6 +57,113 @@ ACCOUNT_CHOICES = ["shin.coaching", "takuma_o369", "masa_life128"]
 # カルーセルのUndo/Redo履歴として保持する最大件数。
 # これを超えたら、最も古い履歴から削除する。
 CAROUSEL_HISTORY_LIMIT = 20
+
+
+# --------------------------------------------------------------------
+# 画像生成のキャッシュ（Story / Carousel共通）
+# --------------------------------------------------------------------
+# Story・Carouselどちらも「デザイン設定を変更するたびに、現在の入力値から
+# その場で画像を再生成する」仕組みになっている。裏を返すと、選択中ページを
+# 切り替えただけ・他のページの本文を編集しただけ・ページを並び替えただけ、
+# といった「この画像の見た目には影響しない操作」でも再実行が走るたびに、
+# 同じ内容のPillow処理（背景画像のEXIF回転・RGB変換・cover/crop・文字の
+# 折り返し・描画）を何度もやり直してしまう。
+#
+# 生成結果は「入力値だけで一意に決まる」純粋な処理なので、
+# st.cache_dataで安全にキャッシュし、入力値が実際に変わったときだけ
+# 再生成する。背景画像（PIL Imageオブジェクト）はそのままでは
+# st.cache_dataのハッシュ対象にすると重く・不安定なため、アップロード
+# ファイルの中身のハッシュ値を別途キーとして渡し、画像オブジェクト自体は
+# 引数名の先頭に "_" を付けてハッシュ対象から除外する
+# （Streamlitの標準的な回避策）。
+def _background_cache_key(file_bytes):
+    """アップロードされた背景画像ファイルの内容から、キャッシュキー用の
+    短いハッシュ値を作る。背景画像が指定されていない場合はNoneを返す。"""
+    if not file_bytes:
+        return None
+    return hashlib.sha256(file_bytes).hexdigest()
+
+
+@st.cache_data(show_spinner=False, max_entries=5)
+def _cached_load_background_image(file_bytes):
+    """
+    背景画像の読み込み（EXIF回転の反映・RGB変換）をキャッシュする。
+
+    デザイン設定（文字サイズ・フォント・文字色など）を変更するたびに
+    同じアップロード済みファイルを毎回読み込み直していたのを防ぐ。
+    キャッシュキーはfile_bytes自体（アップロードされたファイルの中身）
+    なので、別の画像に差し替えれば正しく再読み込みされる。
+    """
+    return load_background_image(file_bytes)
+
+
+@st.cache_data(show_spinner=False, max_entries=20)
+def _cached_story_image(
+    profile_image_url,
+    account_name,
+    original_text,
+    own_replies_tuple,
+    bg_cache_key,
+    text_color,
+    text_bg_color,
+    max_font_size,
+    overlay_opacity,
+    font_key,
+    _background_image,
+):
+    """
+    generate_story_image()の結果をキャッシュする。
+
+    Story画面のデザイン設定を1つ変えるたびに、それ以外の設定が同じ
+    組み合わせであれば以前と同じ画像になる。すべての入力値が一致する
+    場合は再生成をスキップする。プレビュー・PNGダウンロード・
+    Instagram投稿は、この関数が返す同じ結果をそのまま使い続けるため、
+    表示内容がずれることはない。
+    """
+    return generate_story_image(
+        profile_image_url=profile_image_url,
+        account_name=account_name,
+        original_text=original_text,
+        own_replies=list(own_replies_tuple),
+        background_image=_background_image,
+        text_color=text_color,
+        text_bg_color=text_bg_color,
+        max_font_size=max_font_size,
+        overlay_opacity=overlay_opacity,
+        font_key=font_key,
+    )
+
+
+@st.cache_data(show_spinner=False, max_entries=80)
+def _cached_carousel_page_image(
+    page_text,
+    bg_cache_key,
+    text_color,
+    text_bg_color,
+    max_font_size,
+    overlay_opacity,
+    font_key,
+    _background_image,
+):
+    """
+    generate_carousel_page_image()の結果をキャッシュする。
+
+    これにより、ページを選択しただけ・他のページを編集しただけ・
+    ページを並び替えただけ・前後移動しただけ・ページを削除しただけ、
+    といった「そのページ自身の見た目には影響しない操作」では、
+    各ページの画像を再生成せずに済む（キャッシュキーが変わらないため）。
+    本文・背景・デザイン設定のいずれかが変わったページ、または
+    新しく追加されたページだけが実際に再生成される。
+    """
+    return generate_carousel_page_image(
+        page_text,
+        background_image=_background_image,
+        text_color=text_color,
+        text_bg_color=text_bg_color,
+        max_font_size=max_font_size,
+        overlay_opacity=overlay_opacity,
+        font_key=font_key,
+    )
 
 
 def _new_carousel_page_id() -> str:
@@ -445,11 +553,15 @@ if result and result["mode"] == MODE_INSTAGRAM:
         else:
             text_bg_color = None
 
-    # 背景画像はここで一度だけ読み込む。
+    # 背景画像はここで一度だけ読み込む。EXIF回転・RGB変換自体は
+    # _cached_load_background_image()がファイル内容ごとにキャッシュするため、
+    # 他のデザイン設定（文字サイズ・フォント等）を変えるだけの再実行では
+    # 同じファイルを読み込み直さない。
     background_image = None
-    if bg_file is not None:
+    bg_file_bytes = bg_file.getvalue() if bg_file is not None else None
+    if bg_file_bytes is not None:
         try:
-            background_image = load_background_image(bg_file.getvalue())
+            background_image = _cached_load_background_image(bg_file_bytes)
         except StoryImageError as e:
             st.error(e.friendly_message)
             with st.expander("デバッグ情報（エラー詳細）"):
@@ -459,20 +571,23 @@ if result and result["mode"] == MODE_INSTAGRAM:
     # 暗さ・フォント・文字サイズ・文字色・文字の背景）を変更するたびに、
     # Streamlitのwidget再実行の仕組みを利用して、現在の入力値からその場で
     # Story画像を再生成する。Threads APIは呼ばず、ローカルのPillow処理のみ。
+    # 実際の生成結果は_cached_story_image()が入力値ごとにキャッシュしており、
+    # まったく同じ設定の組み合わせであれば再生成しない。
     current_image_bytes = None
     current_warning = None
     try:
-        current_image_bytes, current_warning = generate_story_image(
+        current_image_bytes, current_warning = _cached_story_image(
             profile_image_url=result["profile_image_url"],
             account_name=result["account_name"],
             original_text=result["original_text"],
-            own_replies=result["reply_texts"],
-            background_image=background_image,
+            own_replies_tuple=tuple(result["reply_texts"]),
+            bg_cache_key=_background_cache_key(bg_file_bytes),
             text_color=text_color,
             text_bg_color=text_bg_color,
             max_font_size=font_size,
             overlay_opacity=overlay_percent / 100,
             font_key=story_font_choice,
+            _background_image=background_image,
         )
     except StoryImageError as e:
         st.error(e.friendly_message)
@@ -645,6 +760,17 @@ elif result and result["mode"] == MODE_CAROUSEL:
             label_visibility="collapsed",
         )
 
+    # --- ドラッグ＆ドロップによる並び替え結果を、JavaScriptからPython側へ
+    # 伝えるための非表示ウィジェット（上のscroll_sync_keyと同じ仕組み）。
+    # 値はページIDの配列をJSON文字列にしたもの。
+    reorder_sync_key = f"carousel_reorder_sync_{reset_id}"
+    with st.container(key=reorder_sync_key):
+        synced_reorder_json = st.text_input(
+            "carousel_reorder_sync",
+            key=f"{reorder_sync_key}_input",
+            label_visibility="collapsed",
+        )
+
     page_ids = st.session_state.carousel_page_ids
     # 非表示のテキスト入力は、JS側から新しい値を書き込まない限りその値を
     # 保持し続ける（＝再実行のたびに同じ値を返し続ける）。そのため
@@ -662,6 +788,31 @@ elif result and result["mode"] == MODE_CAROUSEL:
             # （＝クリックによる選択変更だけではUndo履歴を消費しない）。
             st.session_state.carousel_selected_id = synced_page_id
             st.session_state.carousel_force_editor_resync = True
+
+    # ドラッグ＆ドロップによる並び替え結果の反映。
+    # scroll_sync_keyと同じ理由で「前回処理した値からの変化」だけを見る。
+    last_reorder_value = st.session_state.get("carousel_last_reorder_sync_value")
+    if synced_reorder_json and synced_reorder_json != last_reorder_value:
+        st.session_state.carousel_last_reorder_sync_value = synced_reorder_json
+        try:
+            new_order = json.loads(synced_reorder_json)
+        except (TypeError, ValueError):
+            new_order = None
+        # JS側からの値は信用しすぎず、「今のページ構成をそのまま並び替えた
+        # ものである（＝要素の集合が完全に一致する）」ことを確認してから
+        # 反映する。ページ追加・削除の直後にドラッグ結果が届くような
+        # タイミングのずれがあっても、内容を壊さないための安全策。
+        if (
+            isinstance(new_order, list)
+            and all(isinstance(pid, str) for pid in new_order)
+            and sorted(new_order) == sorted(page_ids)
+        ):
+            # page_id・本文・選択状態はそのまま。並び順だけを変更する。
+            # 選択中ページをドラッグした場合も、carousel_selected_id自体は
+            # 変更しないため、そのページを選択したまま維持される
+            # （編集欄もcarousel_selected_idが変わらない限り再同期しない）。
+            st.session_state.carousel_page_ids = new_order
+            page_ids = new_order
 
     # 選択中ページが何らかの理由でページ一覧から消えていたら、先頭ページへ戻す。
     if page_ids and st.session_state.carousel_selected_id not in page_ids:
@@ -734,9 +885,10 @@ elif result and result["mode"] == MODE_CAROUSEL:
         )
 
     # Ctrl+Z/Ctrl+Y（Mac: Cmd+Z/Cmd+Shift+Z）でも、上と同じボタンを操作させる。
-    # 同じJavaScriptの中で、画像クリック／横スクロール停止による選択変更も
-    # 上のscroll_sync_key経由でPython側へ伝えている。
-    inject_carousel_shortcuts_js(scroll_sync_key)
+    # 同じJavaScriptの中で、画像クリックによる選択変更をscroll_sync_key経由、
+    # カードのドラッグ＆ドロップによる並び替えをreorder_sync_key経由で、
+    # それぞれPython側へ伝えている。
+    inject_carousel_shortcuts_js(scroll_sync_key, reorder_sync_key)
 
     if add_page_clicked:
         # 「現在選択中のページの直後」へ新規ページを挿入する。
@@ -867,25 +1019,38 @@ elif result and result["mode"] == MODE_CAROUSEL:
 
     # 背景画像はページ数ぶん何度も読み込み直さないよう、ここで一度だけ読み込む。
     # 読み込みに失敗した場合はエラーを表示しつつ、背景なし（白背景）で
-    # 各ページのプレビューは表示を続ける。
+    # 各ページのプレビューは表示を続ける。EXIF回転・RGB変換自体は
+    # _cached_load_background_image()がファイル内容ごとにキャッシュするため、
+    # ページ選択・本文編集・並び替えなど画像に影響しない再実行では
+    # 同じファイルを読み込み直さない。
     carousel_background_image = None
-    if carousel_bg_file is not None:
+    carousel_bg_file_bytes = (
+        carousel_bg_file.getvalue() if carousel_bg_file is not None else None
+    )
+    if carousel_bg_file_bytes is not None:
         try:
-            carousel_background_image = load_background_image(carousel_bg_file.getvalue())
+            carousel_background_image = _cached_load_background_image(carousel_bg_file_bytes)
         except StoryImageError as e:
             st.error(e.friendly_message)
             with st.expander("デバッグ情報（エラー詳細）"):
                 st.write(e.detail or "詳細情報はありません。")
 
+    carousel_bg_cache_key = _background_cache_key(carousel_bg_file_bytes)
+
     def _generate_carousel_preview(page_text):
-        return generate_carousel_page_image(
+        # 本文・背景・デザイン設定のいずれも変わっていないページは、
+        # _cached_carousel_page_image()がキャッシュ済みの画像をそのまま
+        # 返す（ページ選択・他ページの編集・並び替え・前後移動・削除の
+        # いずれでも、影響を受けないページの画像は再生成されない）。
+        return _cached_carousel_page_image(
             page_text,
-            background_image=carousel_background_image,
+            bg_cache_key=carousel_bg_cache_key,
             text_color=carousel_text_color,
             text_bg_color=carousel_text_bg_color,
             max_font_size=carousel_font_size,
             overlay_opacity=carousel_overlay_percent / 100,
             font_key=carousel_font_choice,
+            _background_image=carousel_background_image,
         )
 
     # ここまでのボタン操作でページ構成が変わっていないことが確定した状態で描画する。
