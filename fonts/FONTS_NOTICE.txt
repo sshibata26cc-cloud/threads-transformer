@@ -11,12 +11,17 @@ Streamlit Community Cloudなど、フォント環境が最小限のLinux実行�
 SIL Open Font License 1.1）で提供されています。
 
 --------------------------------------------------------------------
-UI表示名: ゴシック体
-ファイル: ipaexg.ttf
-フォント名: IPAexゴシック
-ライセンス: IPA Font License Agreement v1.0
-            → IPA_Font_License_Agreement_v1.0.txt / Readme_ipaexg00301.txt
-（本アプリで元々使用していたフォント。変更なし）
+UI表示名: MS P明朝 標準
+ファイル: KaiseiTokumin-Regular.ttf
+フォント名: Kaisei Tokumin
+配布元: https://github.com/Font-Kai/Kaisei (Google Fonts経由 / ofl/kaiseitokumin)
+ライセンス: SIL Open Font License, Version 1.1
+            → KaiseiTokumin-OFL.txt
+注記: 「MS P明朝」はMicrosoft/Windows同梱の商用フォントのため、フォント
+      ファイル自体をライセンス確認なしで同梱することはできない。旧字体・
+      和文らしい印象を持つ明朝系デザインで可読性の高いKaisei Tokuminを
+      代替として採用。以前「教科書体」の表示名で使用していたのと同じ
+      フォントファイルを流用している（教科書体の選択肢自体は廃止）。
 --------------------------------------------------------------------
 UI表示名: 游明朝体
 ファイル: BIZUDPMincho-Regular.ttf
@@ -27,23 +32,17 @@ UI表示名: 游明朝体
             → BIZUDPMincho-OFL.txt
 注記: 「游明朝」はWindows/Office同梱の商用フォントのため同梱不可。
       日本語対応の明朝体（Serif系）で見た目が近く、再配布・商用利用が
-      可能なBIZ UDPMinchoを代替として採用。
+      可能なBIZ UDPMinchoを代替として採用。「MS P明朝 標準」
+      （Kaisei Tokumin）とは別のフォントファイルなので、見た目の
+      違いが出るようにしている。
 --------------------------------------------------------------------
-UI表示名: 教科書体
-ファイル: KaiseiTokumin-Regular.ttf
-フォント名: Kaisei Tokumin
-配布元: https://github.com/Font-Kai/Kaisei (Google Fonts経由 / ofl/kaiseitokumin)
-ライセンス: SIL Open Font License, Version 1.1
-            → KaiseiTokumin-OFL.txt
-注記: 純粋な「教科書体」は商用フォントが中心のため、旧字体・教科書的な
-      印象を持つ明朝系デザインで可読性の高いKaisei Tokuminを代替として採用。
---------------------------------------------------------------------
-UI表示名: 手書き風書体
-ファイル: Yomogi-Regular.ttf
-フォント名: Yomogi（よもぎ）
-配布元: https://github.com/satsuyako/YomogiFont (Google Fonts経由 / ofl/yomogi)
-ライセンス: SIL Open Font License, Version 1.1
-            → Yomogi-OFL.txt
+UI表示名: ゴシック
+ファイル: ipaexg.ttf
+フォント名: IPAexゴシック
+ライセンス: IPA Font License Agreement v1.0
+            → IPA_Font_License_Agreement_v1.0.txt / Readme_ipaexg00301.txt
+（本アプリで元々使用していたフォント。表示名を「ゴシック体」から
+ 「ゴシック」に変更した以外は変更なし）
 --------------------------------------------------------------------
 UI表示名: Arial
 ファイル: Arimo-Regular.ttf
@@ -54,8 +53,15 @@ UI表示名: Arial
 注記: Arial自体は商用フォントのため同梱不可。ArimoはArialと字幅互換を
       意図して作られた代替フォントだが、日本語グリフを含まない。
       本文に日本語が含まれる場合は、豆腐文字（□）を避けるため
-      アプリ側の判定でIPAexゴシック（ipaexg.ttf）へ自動的に切り替える
-      （app_fonts.py の _resolve_font_key を参照）。
+      アプリ側の判定でIPAexゴシック（ipaexg.ttf、UI表示名「ゴシック」）
+      へ自動的に切り替える（app_fonts.py の _resolve_font_key を参照）。
+--------------------------------------------------------------------
+UI表示名: 手書き風書体
+ファイル: Yomogi-Regular.ttf
+フォント名: Yomogi（よもぎ）
+配布元: https://github.com/satsuyako/YomogiFont (Google Fonts経由 / ofl/yomogi)
+ライセンス: SIL Open Font License, Version 1.1
+            → Yomogi-OFL.txt
 --------------------------------------------------------------------
 
 各フォントの完全なライセンス条文は、同じフォルダ内の

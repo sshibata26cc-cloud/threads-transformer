@@ -1,7 +1,7 @@
 """
 Story・Carousel両方で共通して使う、フォント選択機能をまとめたモジュール。
 
-「ゴシック体」「游明朝体」といったユーザー向けの表示名と、実際に読み込む
+「MS P明朝 標準」「游明朝体」といったユーザー向けの表示名と、実際に読み込む
 フォントファイルの対応関係を、このモジュール1か所だけで管理する。
 
 OSにインストールされたフォント名を指定する方式は、Streamlit Community
@@ -21,27 +21,30 @@ from PIL import ImageFont
 FONTS_DIR = os.path.join(os.path.dirname(__file__), "fonts")
 
 # UI表示名 -> 実際に読み込むフォントファイル名（1か所で管理）。
-# 「游明朝体」「教科書体」「Arial」は、ライセンス上そのまま同梱できない
-# 商用フォントの代替として、見た目が近く・日本語対応・再配布可能・
-# 商用利用可能なフォントへマッピングしている。詳細は fonts/FONTS_NOTICE.txt。
+# 「MS P明朝 標準」「游明朝体」「Arial」は、ライセンス上そのまま同梱できない
+# 商用フォント（Windows/Office同梱フォント、Microsoft/Monotype系フォント）の
+# 代替として、見た目が近く・日本語対応・再配布可能・商用利用可能な
+# フォントへマッピングしている。詳細は fonts/FONTS_NOTICE.txt。
+#
+# 辞書の並び順がそのままUIの選択肢の並び順になる
+# （Python 3.7+ の dict は挿入順を保持するため）。
 FONT_FILES = {
-    "ゴシック体": "ipaexg.ttf",  # IPAexゴシック（既存フォント。変更なし）
+    "MS P明朝 標準": "KaiseiTokumin-Regular.ttf",  # Kaisei Tokumin（明朝系の代替）
     "游明朝体": "BIZUDPMincho-Regular.ttf",  # BIZ UDPMincho（明朝/Serif系の代替）
-    "教科書体": "KaiseiTokumin-Regular.ttf",  # Kaisei Tokumin（教科書体に近い代替）
-    "手書き風書体": "Yomogi-Regular.ttf",  # Yomogi（手書き風の代替）
+    "ゴシック": "ipaexg.ttf",  # IPAexゴシック（既存フォント。表示名のみ変更）
     "Arial": "Arimo-Regular.ttf",  # Arimo（Arial互換のSans。日本語グリフなし）
+    "手書き風書体": "Yomogi-Regular.ttf",  # Yomogi（手書き風の代替）
 }
 
 # 選択肢の表示順（Streamlitのselectboxにそのまま渡す）。
 FONT_OPTIONS = list(FONT_FILES.keys())
 
-# フォント機能追加前から使われていたフォントに合わせた既定値。
-# これにより、フォント機能を追加しても初期表示の見た目は変わらない。
-DEFAULT_FONT_KEY = "ゴシック体"
+DEFAULT_FONT_KEY = "MS P明朝 標準"
 
 # 「Arial」（Arimo）は日本語グリフを持たないため、本文に日本語が含まれる
 # 場合はこちらへ自動的に差し替える（豆腐文字「□」を防ぐため）。
-_JAPANESE_FALLBACK_KEY = "ゴシック体"
+# Arialはもともとサンセリフ体なので、代替も同じサンセリフ系（ゴシック）を使う。
+_JAPANESE_FALLBACK_KEY = "ゴシック"
 
 # 日本語（ひらがな・カタカナ・漢字・全角記号・長音符など）を含むかどうかの
 # ざっくりとした判定に使う文字範囲。厳密な文字種判定ではなく、

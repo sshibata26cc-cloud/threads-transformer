@@ -166,6 +166,19 @@ def _cached_carousel_page_image(
     )
 
 
+def _sanitize_font_choice_session_value(key: str) -> None:
+    """
+    st.selectbox()は、session_stateに既にkeyの値が入っている場合、それが
+    optionsに含まれていないとエラーになる。フォントの選択肢を変更・削除
+    したときに、過去のsession_state（例: 削除済みの「教科書体」や、
+    以前のデフォルトだった「ゴシック体」）が残っていてもエラーにならない
+    よう、該当キーの値が現在のFONT_OPTIONSに含まれているかを描画前に
+    確認し、含まれていなければ現在のデフォルトへ差し替える。
+    """
+    if key in st.session_state and st.session_state[key] not in FONT_OPTIONS:
+        st.session_state[key] = DEFAULT_FONT_KEY
+
+
 def _new_carousel_page_id() -> str:
     """
     カルーセルページの内部ID（UUID）を新しく発行する。
@@ -243,6 +256,11 @@ def _apply_carousel_state(state, reset_id):
     design_keys = _carousel_design_keys(reset_id)
     for name, value in state.get("design", {}).items():
         if name in design_keys:
+            if name == "font_choice" and value not in FONT_OPTIONS:
+                # 過去のUndo履歴に、削除済み・改名済みのフォント名
+                # （例: 旧「教科書体」）が残っている場合でもエラーに
+                # ならないよう、現在のデフォルトへ差し替える。
+                value = DEFAULT_FONT_KEY
             st.session_state[design_keys[name]] = value
 
 
@@ -517,6 +535,7 @@ if result and result["mode"] == MODE_INSTAGRAM:
             format="%d%%",
             key=f"story_overlay_{reset_id}",
         )
+        _sanitize_font_choice_session_value(f"story_font_choice_{reset_id}")
         story_font_choice = st.selectbox(
             "フォント",
             FONT_OPTIONS,
@@ -980,6 +999,8 @@ elif result and result["mode"] == MODE_CAROUSEL:
         font_choice_key = f"carousel_font_choice_{reset_id}"
         if font_choice_key not in st.session_state:
             st.session_state[font_choice_key] = DEFAULT_FONT_KEY
+        else:
+            _sanitize_font_choice_session_value(font_choice_key)
         carousel_font_choice = st.selectbox(
             "フォント（全ページ共通）", FONT_OPTIONS, key=font_choice_key
         )
