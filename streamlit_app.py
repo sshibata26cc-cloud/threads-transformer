@@ -170,10 +170,10 @@ def _sanitize_font_choice_session_value(key: str) -> None:
     """
     st.selectbox()は、session_stateに既にkeyの値が入っている場合、それが
     optionsに含まれていないとエラーになる。フォントの選択肢を変更・削除
-    したときに、過去のsession_state（例: 削除済みの「教科書体」や、
-    以前のデフォルトだった「ゴシック体」）が残っていてもエラーにならない
-    よう、該当キーの値が現在のFONT_OPTIONSに含まれているかを描画前に
-    確認し、含まれていなければ現在のデフォルトへ差し替える。
+    したときに、過去のsession_state（例: 削除済みの「教科書体」「MS P明朝
+    標準」や、以前のデフォルトだった「ゴシック体」）が残っていてもエラーに
+    ならないよう、該当キーの値が現在のFONT_OPTIONSに含まれているかを描画前に
+    確認し、含まれていなければ現在のデフォルト（游明朝体）へ差し替える。
     """
     if key in st.session_state and st.session_state[key] not in FONT_OPTIONS:
         st.session_state[key] = DEFAULT_FONT_KEY

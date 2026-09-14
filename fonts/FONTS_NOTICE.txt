@@ -11,18 +11,6 @@ Streamlit Community Cloudなど、フォント環境が最小限のLinux実行�
 SIL Open Font License 1.1）で提供されています。
 
 --------------------------------------------------------------------
-UI表示名: MS P明朝 標準
-ファイル: KaiseiTokumin-Regular.ttf
-フォント名: Kaisei Tokumin
-配布元: https://github.com/Font-Kai/Kaisei (Google Fonts経由 / ofl/kaiseitokumin)
-ライセンス: SIL Open Font License, Version 1.1
-            → KaiseiTokumin-OFL.txt
-注記: 「MS P明朝」はMicrosoft/Windows同梱の商用フォントのため、フォント
-      ファイル自体をライセンス確認なしで同梱することはできない。旧字体・
-      和文らしい印象を持つ明朝系デザインで可読性の高いKaisei Tokuminを
-      代替として採用。以前「教科書体」の表示名で使用していたのと同じ
-      フォントファイルを流用している（教科書体の選択肢自体は廃止）。
---------------------------------------------------------------------
 UI表示名: 游明朝体
 ファイル: BIZUDPMincho-Regular.ttf
 フォント名: BIZ UDPMincho
@@ -32,9 +20,8 @@ UI表示名: 游明朝体
             → BIZUDPMincho-OFL.txt
 注記: 「游明朝」はWindows/Office同梱の商用フォントのため同梱不可。
       日本語対応の明朝体（Serif系）で見た目が近く、再配布・商用利用が
-      可能なBIZ UDPMinchoを代替として採用。「MS P明朝 標準」
-      （Kaisei Tokumin）とは別のフォントファイルなので、見た目の
-      違いが出るようにしている。
+      可能なBIZ UDPMinchoを代替として採用。Story / Carousel共通の
+      デフォルトフォント。
 --------------------------------------------------------------------
 UI表示名: ゴシック
 ファイル: ipaexg.ttf

@@ -447,6 +447,9 @@ def inject_carousel_shortcuts_js(scroll_sync_key: str = None, reorder_sync_key: 
             // ページとの間でも並び替えられるようにするため。
             dragState.clientX = e.clientX;
             dragState.clientY = e.clientY;
+            // pointerup/pointercancel側の「本当にドラッグが終わったか」の
+            // 判定に使う（下のdeferredDragCleanup参照）。
+            lastDragOverAt = Date.now();
 
             var card = e.target.closest('[class*="st-key-carousel_card_"]');
             if (!card) {
@@ -512,19 +515,65 @@ def inject_carousel_shortcuts_js(scroll_sync_key: str = None, reorder_sync_key: 
             stopAutoScroll();
         });
 
-        // pointerup/pointercancelは、通常はdragend/dropで先に処理が終わって
-        // いるはずだが、ブラウザによってはドラッグ中にウィンドウ外へ
-        // ポインタが出た場合などにdragendが発火しないことがあるため、
-        // 自動スクロールのrequestAnimationFrameループが残り続けることを
-        // 防ぐための保険として、念のためここでも止めておく。
-        document.addEventListener('pointerup', function () {
-            dragState = null;
-            stopAutoScroll();
-        });
-        document.addEventListener('pointercancel', function () {
-            dragState = null;
-            stopAutoScroll();
-        });
+        // pointerup/pointercancelは、あくまで「dragend/dropが万一発火しな
+        // かった場合」の保険として残す。
+        //
+        // 重要: ネイティブHTML5ドラッグ＆ドロップでは、dragstart成功の直後に
+        // ブラウザがそのポインタの通常イベント列をドラッグ操作へ引き継ぐため、
+        // 「pointercancel」はドロップの直前ではなく、ドラッグ"開始"の直後に
+        // （まだdragover/dropが1回も起きていない時点で）発火するのが仕様上
+        // 標準的な挙動である（実機・Playwright双方の実イベント順で確認済み:
+        // pointerdown → dragstart → pointercancel → dragover(複数回) → drop
+        // → dragend）。そのため、pointercancelは「ドラッグが終わった」合図
+        // ではなく、むしろ「ネイティブドラッグへ正常に引き継がれた」合図に
+        // 近い。ここでdragStateを即座に（あるいは固定の短い遅延だけで）
+        // nullへ戻すと、その後に発火するはずのdragover/drop側が「ドラッグ中
+        // ではない」と誤判定し、並び替えが一切行われなくなってしまう
+        // （実際にこの不具合が発生し、ドラッグ並び替えが機能しなくなって
+        // いた原因はこれだった）。
+        //
+        // さらに、固定時間（例: 600ms）だけ待ってから後片付けする方式も
+        // 不十分だと判明した。カルーセル左右端での自動スクロール機能は、
+        // 端付近でポインタを保持し続けている間ずっとドラッグを継続する
+        // ことが前提のため、自動スクロールを使った並び替え（＝ドラッグ
+        // 開始から数百ms〜数秒後にドロップする操作）では、まだドラッグを
+        // 継続しているにもかかわらず固定タイマーの方が先に発火し、
+        // dragStateを消してしまい、同じ理由で並び替えが失敗することが
+        // 実際に確認された。
+        //
+        // そのため、時間ベースの固定タイマーではなく、「直近にdragoverが
+        // 発生しているかどうか」で本当にドラッグが終わっているかを判定する。
+        // dragoverはアクティブなドラッグ中は継続的に（ポインタが動くたびに）
+        // 発生し続けるため、まだ発生し続けている間は後片付けを先送りし、
+        // 一定時間dragoverが来なくなって初めて「本当にドラッグが終わった」
+        // と判断して後片付けする。これなら、ドラッグの継続時間に関わらず、
+        // 正常なdrop/dragendの処理を妨げない。
+        var lastDragOverAt = 0;
+        var DRAG_IDLE_THRESHOLD_MS = 400;
+
+        function deferredDragCleanup() {
+            function check() {
+                if (!dragState) {
+                    // drop/dragend側で既に正常に後片付け済み。
+                    return;
+                }
+                var idleMs = Date.now() - lastDragOverAt;
+                if (idleMs < DRAG_IDLE_THRESHOLD_MS) {
+                    // dragoverがまだ最近発生している＝ドラッグは継続中と
+                    // みなし、後片付けを先送りして再度確認する。
+                    setTimeout(check, 200);
+                    return;
+                }
+                // dragoverがしばらく発生していない＝本当にドラッグが
+                // 終わっている（dragend/dropが何らかの理由で発火しなかった
+                // 異常系）と判断し、ここで強制的に後片付けする。
+                dragState = null;
+                stopAutoScroll();
+            }
+            setTimeout(check, 200);
+        }
+        document.addEventListener('pointerup', deferredDragCleanup);
+        document.addEventListener('pointercancel', deferredDragCleanup);
 
         // --- カード（プレビュー画像）のクリックだけで選択する ---
         // 横スクロール自体はブラウザ標準の挙動（overflow-x: auto）に任せて
