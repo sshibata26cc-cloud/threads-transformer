@@ -8,11 +8,10 @@ from app_meta import inject_mobile_meta_tags, resolve_page_icon
 from carousel_generator import generate_carousel_page_image
 from carousel_splitter import split_into_pages
 from carousel_ui import (
-    COVERFLOW_RADIUS,
     REDO_BUTTON_LABEL,
     UNDO_BUTTON_LABEL,
     inject_carousel_card_css,
-    inject_carousel_center_scroll_js,
+    inject_carousel_scroll_restore_js,
     inject_carousel_shortcuts_js,
 )
 from cloudinary_storage import (
@@ -632,11 +631,12 @@ elif result and result["mode"] == MODE_CAROUSEL:
 
     st.markdown('<div class="tt-step-title">カルーセルページ</div>', unsafe_allow_html=True)
 
-    # --- 画像クリック／横スクロールによる選択変更を、JavaScriptからPython側へ
-    # 伝えるための非表示ウィジェット。見た目には一切現れない（CSSで
-    # 完全に非表示にしている。carousel_ui.pyのinject_carousel_card_css参照）。
+    # --- 画像クリックによる選択変更を、JavaScriptからPython側へ伝えるための
+    # 非表示ウィジェット。見た目には一切現れない（CSSで完全に非表示にしている。
+    # carousel_ui.pyのinject_carousel_card_css参照）。
     # JS側は、この中のテキスト入力の値をページIDへ書き換えることで、
     # Streamlitの通常の再実行フローに乗せてPython側へ伝える。
+    # 横スクロールだけでは、この値は変化しない（＝選択は変わらない）。
     scroll_sync_key = f"carousel_scroll_sync_{reset_id}"
     with st.container(key=scroll_sync_key):
         synced_page_id = st.text_input(
@@ -656,21 +656,12 @@ elif result and result["mode"] == MODE_CAROUSEL:
     if synced_page_id and synced_page_id != last_synced_value:
         st.session_state.carousel_last_scroll_sync_value = synced_page_id
         if synced_page_id in page_ids and synced_page_id != st.session_state.carousel_selected_id:
-            # 画像クリック／スクロール停止による選択変更。
+            # 画像クリックによる選択変更。
             # _carousel_content_signature()はselected_idを見ないため、この後の
             # _push_carousel_history()は新しいUndo履歴を作らない
-            # （＝スクロールだけではUndo履歴を消費しない）。
+            # （＝クリックによる選択変更だけではUndo履歴を消費しない）。
             st.session_state.carousel_selected_id = synced_page_id
             st.session_state.carousel_force_editor_resync = True
-            # このページはJS側の判定で「すでに中央に来ている」と分かったから
-            # 選択されている。ここでinject_carousel_center_scroll_js()による
-            # 追加のscrollIntoView()を発火させると、そのscroll操作自体が
-            # 新たなscrollイベントとして検知され、再び選択通知→ 再センタリング
-            # …という無限に近いフィードバックループを引き起こし、その連鎖する
-            # 再実行の合間に本来の（元に戻す等の）ボタンクリックが失われることが
-            # あった。スクロール由来の選択変更では自動センタリングを呼ばないことで、
-            # このループを断つ。
-            st.session_state.carousel_skip_auto_center = True
 
     # 選択中ページが何らかの理由でページ一覧から消えていたら、先頭ページへ戻す。
     if page_ids and st.session_state.carousel_selected_id not in page_ids:
@@ -908,27 +899,17 @@ elif result and result["mode"] == MODE_CAROUSEL:
         page_texts = {pid: st.session_state.carousel_store.get(pid, "") for pid in page_ids}
         selected_index = page_ids.index(selected_id)
 
-        # --- メインプレビュー（コンベア表示） ---
-        # 選択中ページを中心に、前後COVERFLOW_RADIUSページ分だけを表示する。
-        # ページ数が多くても、毎回この範囲の画像だけ生成すればよいため、
-        # 不要な再計算を避けられる。
-        window_start = max(0, selected_index - COVERFLOW_RADIUS)
-        window_end = min(total_pages, selected_index + COVERFLOW_RADIUS + 1)
-        window_indices = list(range(window_start, window_end))
-
-        # 選択中ページ（距離0）からの距離に応じて、CSSでカードの大きさ・
-        # 立体感を段階的に変える（小 → 中 → 大[中央] → 中 → 小）。
-        distance_by_page_id = {
-            page_ids[i]: abs(i - selected_index) for i in window_indices
-        }
-        inject_carousel_card_css(distance_by_page_id)
+        # --- メインプレビュー（横一列・全ページ表示） ---
+        # すべてのページを同じ大きさで横一列に並べ、画面幅を超えた分は
+        # 自由に横スクロールして閲覧できるようにする（選択中かどうかに
+        # 関係なく、常に全ページを表示する）。
+        inject_carousel_card_css(selected_id)
 
         selected_image_bytes = None
         selected_warning = None
 
         with st.container(horizontal=True, wrap=False, key="carousel_thumb_row"):
-            for i in window_indices:
-                pid = page_ids[i]
+            for pid in page_ids:
                 is_selected = pid == selected_id
                 with st.container(key=f"carousel_card_{pid}", border=True, width="content"):
                     page_image_bytes = None
@@ -949,23 +930,19 @@ elif result and result["mode"] == MODE_CAROUSEL:
 
                     if page_image_bytes:
                         # 画像そのものの生成サイズは1080x1350のまま。
-                        # 表示サイズだけをCSS（carousel_ui.py）で縮小・拡大する。
+                        # 表示サイズはCSS（carousel_ui.py）ですべてのカードで
+                        # 統一する（選択位置による拡大縮小は行わない）。
                         # プレビュー画像自体をクリックすると、carousel_ui.pyの
                         # JavaScript（inject_carousel_shortcuts_js）がそのページを
                         # 選択状態にする。専用の選択ボタンは設けていない。
                         st.image(page_image_bytes, width=280)
 
-        # 選択中ページが変わったときに、そのカードを横スクロール領域の
-        # 中央へ自動的にスクロールする（scroll-snapと組み合わせて使う）。
-        # ただし、今回の選択変更がスクロール自体（JSの中央判定）によるものだった
-        # 場合はスキップする。そのカードは判定の時点ですでに中央にあり、
-        # ここで改めてscrollIntoView()すると、それ自体が新たなscrollイベントを
-        # 生み、再び選択通知→再センタリングを繰り返すフィードバックループに
-        # なってしまうため（このループの連鎖中はボタンクリックが失われることもあった）。
-        if st.session_state.pop("carousel_skip_auto_center", False):
-            pass
-        else:
-            inject_carousel_center_scroll_js(selected_id)
+        # 選択してもスクロール位置を勝手に変更しない（ユーザーが見ている
+        # 位置をそのまま維持する）。Streamlitは再実行のたびにこの領域の
+        # DOMを作り直すことがあり、そのままではブラウザ側の横スクロール
+        # 位置が0へ戻ってしまうことがあるため、直前のスクロール位置を
+        # 明示的に復元する（新しい位置へ移動させるものではない）。
+        inject_carousel_scroll_restore_js()
 
         # --- 「ページ N / M を編集中」表示 ---
         # プレビュー画像そのものにはページ番号を描画していないため、
