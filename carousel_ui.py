@@ -354,11 +354,68 @@ def inject_carousel_shortcuts_js(scroll_sync_key: str = None, reorder_sync_key: 
         // 単純なクリックとは自然に区別され、ドラッグ終了後に誤ってclickが
         // 発火した場合でも、下のclickハンドラ側でjustDraggedフラグにより
         // 選択変更として扱わないようにしている。
-        // ドラッグ中（dragover）はブラウザ内の見た目の追跡だけを行い、
-        // Python側には一切送信しない。ドロップが確定した瞬間（drop）に、
-        // 新しいページ順を1回だけまとめて送信する。
+        // ドラッグ中（dragover・端での自動スクロール）はブラウザ内の見た目の
+        // 追跡だけを行い、Python側には一切送信しない。ドロップが確定した
+        // 瞬間（drop）に、新しいページ順を1回だけまとめて送信する。
         var dragState = null;
         var justDragged = false;
+
+        // --- ドラッグ中、カルーセル表示領域の端に近づいたときの自動スクロール ---
+        // 画面内に見えているカード同士だけでなく、今は見えていない前後の
+        // ページとの間でも並び替えられるようにするための機能。
+        // setIntervalではなくrequestAnimationFrameを使い、ブラウザの描画に
+        // 合わせて滑らかに、かつ余計な処理を積み増さずに動かす。
+        var EDGE_ZONE = 80; // 端からこの距離（px）以内でのみ自動スクロールする
+        var MIN_SCROLL_SPEED = 2; // 端の外縁ぎりぎり（EDGE_ZONE付近）での速度(px/frame)
+        var MAX_SCROLL_SPEED = 8; // 端そのものに極めて近いときの最大速度(px/frame)
+        var VERTICAL_SLACK = 60; // 行の上下からこの範囲内ならまだ「行の上」とみなす
+        var autoScrollRafId = null;
+
+        function computeEdgeScrollSpeed(distanceFromEdge) {
+            // 端からの距離が0（端そのもの）に近いほどMAX_SCROLL_SPEEDに、
+            // EDGE_ZONEに近いほどMIN_SCROLL_SPEEDに近づくよう線形補間する。
+            var t = 1 - (distanceFromEdge / EDGE_ZONE);
+            t = Math.max(0, Math.min(1, t));
+            return MIN_SCROLL_SPEED + (MAX_SCROLL_SPEED - MIN_SCROLL_SPEED) * t;
+        }
+
+        function stopAutoScroll() {
+            if (autoScrollRafId !== null) {
+                cancelAnimationFrame(autoScrollRafId);
+                autoScrollRafId = null;
+            }
+        }
+
+        function startAutoScroll() {
+            stopAutoScroll();
+            function tick() {
+                // ドロップ・キャンセル等でdragStateが消えたら、このフレームで
+                // 静かにループを終わらせる（次のrequestAnimationFrameは
+                // 予約しない）。
+                if (!dragState) {
+                    autoScrollRafId = null;
+                    return;
+                }
+                var row = document.querySelector('.st-key-carousel_thumb_row');
+                if (row && typeof dragState.clientX === 'number') {
+                    var rect = row.getBoundingClientRect();
+                    var x = dragState.clientX;
+                    var y = dragState.clientY;
+                    var withinVertical = y >= rect.top - VERTICAL_SLACK && y <= rect.bottom + VERTICAL_SLACK;
+                    if (withinVertical) {
+                        var distFromLeft = x - rect.left;
+                        var distFromRight = rect.right - x;
+                        if (distFromLeft >= 0 && distFromLeft < EDGE_ZONE) {
+                            row.scrollLeft -= computeEdgeScrollSpeed(distFromLeft);
+                        } else if (distFromRight >= 0 && distFromRight < EDGE_ZONE) {
+                            row.scrollLeft += computeEdgeScrollSpeed(distFromRight);
+                        }
+                    }
+                }
+                autoScrollRafId = requestAnimationFrame(tick);
+            }
+            autoScrollRafId = requestAnimationFrame(tick);
+        }
 
         document.addEventListener('dragstart', function (e) {
             var card = e.target.closest('[class*="st-key-carousel_card_"]');
@@ -369,7 +426,7 @@ def inject_carousel_shortcuts_js(scroll_sync_key: str = None, reorder_sync_key: 
             if (!pid) {
                 return;
             }
-            dragState = { pid: pid };
+            dragState = { pid: pid, clientX: e.clientX, clientY: e.clientY };
             try {
                 e.dataTransfer.effectAllowed = 'move';
                 e.dataTransfer.setData('text/plain', pid);
@@ -377,12 +434,20 @@ def inject_carousel_shortcuts_js(scroll_sync_key: str = None, reorder_sync_key: 
                 // dataTransferを設定できないブラウザでも、dragState側の
                 // 追跡だけで並び替え自体は成立する。
             }
+            startAutoScroll();
         });
 
         document.addEventListener('dragover', function (e) {
             if (!dragState) {
                 return;
             }
+            // 端の自動スクロール判定に使う現在位置は、カードの真上に
+            // いなくても（カード同士の隙間やカルーセル領域の余白でも）
+            // 更新する。カルーセルが自動スクロールして初めて見える
+            // ページとの間でも並び替えられるようにするため。
+            dragState.clientX = e.clientX;
+            dragState.clientY = e.clientY;
+
             var card = e.target.closest('[class*="st-key-carousel_card_"]');
             if (!card) {
                 return;
@@ -436,6 +501,7 @@ def inject_carousel_shortcuts_js(scroll_sync_key: str = None, reorder_sync_key: 
             // しまうのを防ぐため。
             justDragged = true;
             dragState = null;
+            stopAutoScroll();
             setTimeout(function () {
                 justDragged = false;
             }, 300);
@@ -443,6 +509,21 @@ def inject_carousel_shortcuts_js(scroll_sync_key: str = None, reorder_sync_key: 
 
         document.addEventListener('dragend', function () {
             dragState = null;
+            stopAutoScroll();
+        });
+
+        // pointerup/pointercancelは、通常はdragend/dropで先に処理が終わって
+        // いるはずだが、ブラウザによってはドラッグ中にウィンドウ外へ
+        // ポインタが出た場合などにdragendが発火しないことがあるため、
+        // 自動スクロールのrequestAnimationFrameループが残り続けることを
+        // 防ぐための保険として、念のためここでも止めておく。
+        document.addEventListener('pointerup', function () {
+            dragState = null;
+            stopAutoScroll();
+        });
+        document.addEventListener('pointercancel', function () {
+            dragState = null;
+            stopAutoScroll();
         });
 
         // --- カード（プレビュー画像）のクリックだけで選択する ---
