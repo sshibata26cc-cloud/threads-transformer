@@ -128,6 +128,7 @@ def render_story_video(
     overlay_opacity=0.0,
     suffix: str = ".mp4",
     start: float = 0.0,
+    duration: float = MAX_VIDEO_SECONDS,
 ) -> bytes:
     """
     背景動画の上に文字レイヤーを重ねた、1080x1920のMP4を書き出して返す。
@@ -137,7 +138,8 @@ def render_story_video(
         frame_size: load_video_poster()で得た静止画の (幅, 高さ)。
         bg_fit / bg_offset / overlay_opacity: generate_story_image()と同じ意味。
         start: 元の動画のうち、使用する区間の開始位置（秒）。
-               そこから最長MAX_VIDEO_SECONDS秒ぶんを書き出す。
+        duration: startから書き出す長さ（秒）。MAX_VIDEO_SECONDSを超える指定は
+                  MAX_VIDEO_SECONDSに丸める。
     """
     src_w, src_h = frame_size
     offset_x, offset_y = bg_offset or (0, 0)
@@ -178,7 +180,7 @@ def render_story_video(
                 "-filter_complex", filter_graph,
                 "-map", "[out]",
                 "-map", "0:a?",
-                "-t", str(MAX_VIDEO_SECONDS),
+                "-t", f"{max(0.1, min(duration, MAX_VIDEO_SECONDS)):.2f}",
                 "-r", str(OUTPUT_FPS),
                 "-c:v", "libx264",
                 "-preset", "veryfast",

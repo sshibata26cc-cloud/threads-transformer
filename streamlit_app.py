@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import uuid
 
 import streamlit as st
@@ -127,6 +128,23 @@ def _cached_video_poster(bg_cache_key, _video_bytes, suffix, start=0):
     startは使用する区間の開始位置（秒）。
     """
     return load_video_poster(_video_bytes, suffix=suffix, start=start)
+
+
+def _limit_video_range(range_key):
+    """
+    「使用する区間」スライダーのon_changeコールバック。区間がMAX_VIDEO_SECONDS秒を
+    超えたら、いま動かしていない側のつまみを追従させて上限内に収める
+    （開始を動かしたら終了を、終了を動かしたら開始を寄せる）。
+    """
+    start, end = st.session_state[range_key]
+    if end - start <= MAX_VIDEO_SECONDS:
+        return
+    prev_start, _ = st.session_state.get(range_key + "_prev", (start, end))
+    if start != prev_start:
+        end = start + MAX_VIDEO_SECONDS
+    else:
+        start = end - MAX_VIDEO_SECONDS
+    st.session_state[range_key] = (start, end)
 
 
 def _format_seconds(seconds) -> str:
@@ -658,6 +676,7 @@ if result and result["mode"] == MODE_INSTAGRAM:
     bg_file_bytes = bg_file.getvalue() if bg_file is not None else None
     bg_suffix = ""
     video_start = 0  # 動画のうち使用する区間の開始位置（秒）
+    video_end = MAX_VIDEO_SECONDS  # 同じく終了位置（秒）
     preview_bg_key = None
     if bg_file_bytes is not None:
         bg_is_video = is_video_filename(bg_file.name)
@@ -670,38 +689,45 @@ if result and result["mode"] == MODE_INSTAGRAM:
                 background_image, video_duration = _cached_video_poster(
                     bg_cache_key, bg_file_bytes, bg_suffix
                 )
-                # 60秒を超える動画は、使用する区間をここで選んでもらう。
-                # 選んだ開始位置のコマをプレビューに表示し、書き出しも
-                # その位置から行う。
-                max_start = int((video_duration or 0) - MAX_VIDEO_SECONDS)
-                if max_start >= 1:
+                # 動画のうち使用する区間（開始〜終了）をここで選んでもらう。
+                # 長さの上限はMAX_VIDEO_SECONDS秒。選んだ開始位置のコマを
+                # プレビューに表示し、書き出しもその区間だけを行う。
+                video_total = math.ceil(video_duration or 0)
+                if video_total >= 1:
+                    range_key = f"story_video_range_{reset_id}_{bg_file.file_id}"
                     st.markdown(
                         '<div class="tt-step-title">動画の使用区間</div>',
                         unsafe_allow_html=True,
                     )
                     with st.container(border=True):
                         st.write(
-                            f"この動画は{_format_seconds(video_duration)}あります。"
-                            f"ストーリーズの動画は最長{MAX_VIDEO_SECONDS}秒のため、"
-                            "使用する区間の開始位置を選んでください。"
+                            f"この動画は{_format_seconds(video_total)}あります。"
+                            f"使用する区間の開始位置と終了位置を選んでください"
+                            f"（最長{MAX_VIDEO_SECONDS}秒）。"
                         )
-                        video_start = st.select_slider(
-                            "開始位置",
-                            options=list(range(max_start + 1)),
-                            value=0,
+                        video_start, video_end = st.select_slider(
+                            "使用する区間",
+                            options=list(range(video_total + 1)),
+                            value=(0, min(video_total, MAX_VIDEO_SECONDS)),
                             format_func=_format_seconds,
-                            key=f"story_video_start_{reset_id}_{bg_file.file_id}",
+                            key=range_key,
+                            on_change=_limit_video_range,
+                            args=(range_key,),
                         )
+                        st.session_state[range_key + "_prev"] = (video_start, video_end)
+                        if video_end <= video_start:
+                            # 開始と終了が同じ位置のときは、最低1秒ぶんを使う。
+                            video_end = video_start + 1
                         st.caption(
                             f"使用する区間: {_format_seconds(video_start)} 〜 "
-                            f"{_format_seconds(video_start + MAX_VIDEO_SECONDS)}"
-                            f"（{MAX_VIDEO_SECONDS}秒間）"
+                            f"{_format_seconds(video_end)}"
+                            f"（{video_end - video_start}秒間）"
                         )
                         with st.expander("選んだ区間を再生して確認する"):
                             st.video(
                                 bg_file_bytes,
                                 start_time=video_start,
-                                end_time=video_start + MAX_VIDEO_SECONDS,
+                                end_time=video_end,
                             )
                     if video_start:
                         background_image, _ = _cached_video_poster(
@@ -775,6 +801,7 @@ if result and result["mode"] == MODE_INSTAGRAM:
                         bg_offset,
                         overlay_percent,
                         video_start,
+                        video_end,
                     )
                 ).encode()
             ).hexdigest()
@@ -793,6 +820,7 @@ if result and result["mode"] == MODE_INSTAGRAM:
                                 overlay_opacity=overlay_percent / 100,
                                 suffix=bg_suffix,
                                 start=video_start,
+                                duration=video_end - video_start,
                             ),
                         }
                 except StoryImageError as e:
