@@ -102,6 +102,77 @@ def upload_story_image(jpeg_bytes: bytes):
     return url, result.get("public_id", public_id)
 
 
+def upload_story_video(mp4_bytes: bytes):
+    """
+    MP4のバイト列をCloudinaryへアップロードし、(公開URL, public_id) を返す。
+    upload_story_image()の動画版。
+    """
+    _configure()
+
+    public_id = f"{UPLOAD_FOLDER}/{uuid.uuid4().hex}"
+    try:
+        result = cloudinary.uploader.upload(
+            mp4_bytes,
+            public_id=public_id,
+            resource_type="video",
+            overwrite=False,
+        )
+    except Exception as e:
+        raise CloudinaryError(
+            "投稿用動画の準備に失敗しました。もう一度お試しください。",
+            detail=str(e),
+        )
+
+    url = (result.get("secure_url") or "").strip()
+    if not url or any(ch.isspace() for ch in url):
+        raise CloudinaryError(
+            "投稿用動画の準備に失敗しました。もう一度お試しください。",
+            detail=f"Cloudinaryのsecure_urlが不正です（値: {url!r}）。",
+        )
+
+    return url, result.get("public_id", public_id)
+
+
+def verify_video_url(url: str) -> dict:
+    """
+    Cloudinaryへアップロードした動画が、外部から実際に取得できるかを確認する
+    （verify_image_url()の動画版）。動画は大きいので本文はダウンロードせず、
+    HTTP 200でContent-Typeがvideo/であることだけを確認する。
+    """
+    last_detail = "不明なエラー"
+
+    for attempt in range(1, URL_VERIFY_MAX_ATTEMPTS + 1):
+        try:
+            response = requests.get(url, timeout=URL_VERIFY_TIMEOUT_SECONDS, stream=True)
+            response.close()
+        except requests.exceptions.RequestException as e:
+            last_detail = f"通信エラー: {e}"
+        else:
+            content_type = response.headers.get("Content-Type", "")
+            byte_count = int(response.headers.get("Content-Length") or 0)
+            if response.status_code == 200 and content_type.startswith("video/"):
+                return {
+                    "status_code": response.status_code,
+                    "content_type": content_type,
+                    "byte_count": byte_count,
+                }
+            last_detail = (
+                f"ステータスコード: {response.status_code} / "
+                f"Content-Type: {content_type or '(なし)'}"
+            )
+
+        if attempt < URL_VERIFY_MAX_ATTEMPTS:
+            time.sleep(URL_VERIFY_RETRY_DELAY_SECONDS)
+
+    raise CloudinaryError(
+        "投稿用動画の準備に失敗しました。もう一度お試しください。",
+        detail=(
+            f"公開URLの検証に{URL_VERIFY_MAX_ATTEMPTS}回試行しても成功しませんでした。"
+            f"最終結果: {last_detail}"
+        ),
+    )
+
+
 def verify_image_url(url: str) -> dict:
     """
     Cloudinaryへアップロードした画像が、外部から実際に取得できる
@@ -169,9 +240,10 @@ def verify_image_url(url: str) -> dict:
     )
 
 
-def delete_story_image(public_id: str) -> bool:
+def delete_story_image(public_id: str, resource_type: str = "image") -> bool:
     """
-    アップロード済みの一時画像をCloudinaryから削除する。
+    アップロード済みの一時画像（resource_type="video"なら一時動画）を
+    Cloudinaryから削除する。
 
     Instagram側でのメディアコンテナ作成・公開処理がすべて成功した後の
     後片付けとしてのみ呼ぶこと。ここで失敗しても例外は送出せず、
@@ -179,7 +251,7 @@ def delete_story_image(public_id: str) -> bool:
     """
     try:
         _configure()
-        cloudinary.uploader.destroy(public_id, resource_type="image")
+        cloudinary.uploader.destroy(public_id, resource_type=resource_type)
         return True
     except Exception:
         return False

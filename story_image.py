@@ -8,6 +8,12 @@ Threadsの投稿内容から、Instagramストーリーズ用のPNG画像を生�
 背景画像・文字色・文字の背景色・文字サイズ（の上限）・背景の暗さ・フォントは、
 呼び出し側（Streamlit画面）からユーザーが指定できる。
 
+背景は「横いっぱい」「縦いっぱい」のどちらかで差し込み、位置（オフセット）も
+指定できる。文字だけを描いた透明レイヤー（render_story_text_layer）と背景の
+配置計算（compute_background_placement）を分けてあるので、ブラウザ上の
+プレビュー・PNG書き出し・動画書き出し（story_video.py）のすべてが
+同じ計算結果を使う。
+
 フォントの選択肢・同梱フォントファイル・ライセンスについては
 app_fonts.py と fonts/FONTS_NOTICE.txt を参照。
 """
@@ -15,8 +21,6 @@ app_fonts.py と fonts/FONTS_NOTICE.txt を参照。
 import io
 import re
 
-import requests
-import streamlit as st
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from app_fonts import DEFAULT_FONT_KEY, get_font
@@ -30,12 +34,12 @@ MARGIN_X = 72
 MARGIN_TOP = 90
 MARGIN_BOTTOM = 90
 
-PROFILE_DIAMETER = 108
-HEADER_GAP = 28  # プロフィール画像とアカウント名の間
-SECTION_GAP = 56  # ヘッダーと本文の間
 BLOCK_GAP = 40  # 本文と返信、返信同士の間
 
-NAME_FONT_SIZE = 42
+# 背景の差し込み方。
+BG_FIT_WIDTH = "width"  # 横いっぱい（背景の横幅をキャンバスの横幅に合わせる）
+BG_FIT_HEIGHT = "height"  # 縦いっぱい（背景の高さをキャンバスの高さに合わせる）
+DEFAULT_BG_FIT = BG_FIT_WIDTH
 
 DEFAULT_TEXT_COLOR = "#1E1E1E"
 DEFAULT_TEXT_BG_COLOR = "#FFFFFF"  # 「色を設定」を選んだときのカラーピッカー初期値
@@ -138,39 +142,57 @@ def _cover_resize(image: Image.Image, target_w: int, target_h: int) -> Image.Ima
     return resized.crop((left, top, left + target_w, top + target_h))
 
 
-@st.cache_data(show_spinner=False, max_entries=10)
-def _fetch_circular_profile_image(url, diameter: int):
+def compute_background_placement(
+    src_w,
+    src_h,
+    fit_mode=DEFAULT_BG_FIT,
+    offset_x=0,
+    offset_y=0,
+    canvas_w=CANVAS_WIDTH,
+    canvas_h=CANVAS_HEIGHT,
+):
     """
-    プロフィール画像を取得し円形に切り抜く。取得できない場合はNoneを返す。
+    背景（画像・動画）をキャンバスへ差し込むときの、拡大縮小後のサイズと
+    左上座標を計算する。戻り値: (幅, 高さ, 左, 上)（いずれもキャンバスのpx）。
 
-    プロフィール画像はThreadsアカウントを変換し直すまで変わらないが、
-    文字サイズ・フォント・背景の暗さなど他のデザイン設定を変えるたびに
-    Story画像全体が再生成され、そのたびにこの関数も呼ばれてしまう。
-    (url, diameter)だけで結果が一意に決まる純粋な処理なので、
-    ネットワーク取得を毎回繰り返さないようキャッシュする。
+    fit_modeがBG_FIT_WIDTHなら横幅を、BG_FIT_HEIGHTなら高さをキャンバスに
+    ぴったり合わせる（縦横比は保つ）。offset_x・offset_yは「中央に置いた
+    状態からのずれ」で、背景がキャンバスの外へ出ていかない範囲
+    （はみ出している軸ははみ出しぶん、足りない軸は余白ぶん）に丸める。
+
+    プレビュー用コンポーネント（story_preview_component/index.html）も
+    これと同じ式で配置しているため、変更する場合は両方を揃えること。
     """
-    if not url:
-        return None
-    try:
-        response = requests.get(url, timeout=15)
-        response.raise_for_status()
-        image = Image.open(io.BytesIO(response.content)).convert("RGBA")
-    except Exception:
-        return None
+    if fit_mode == BG_FIT_HEIGHT:
+        scale = canvas_h / src_h
+    else:
+        scale = canvas_w / src_w
+    new_w = max(1, round(src_w * scale))
+    new_h = max(1, round(src_h * scale))
 
-    side = min(image.size)
-    left = (image.width - side) // 2
-    top = (image.height - side) // 2
-    image = image.crop((left, top, left + side, top + side)).resize(
-        (diameter, diameter), Image.LANCZOS
+    max_dx = abs(canvas_w - new_w) / 2
+    max_dy = abs(canvas_h - new_h) / 2
+    dx = max(-max_dx, min(max_dx, offset_x or 0))
+    dy = max(-max_dy, min(max_dy, offset_y or 0))
+
+    left = round((canvas_w - new_w) / 2 + dx)
+    top = round((canvas_h - new_h) / 2 + dy)
+    return new_w, new_h, left, top
+
+
+def _paste_background(canvas, image, fit_mode, offset, overlay_opacity):
+    """背景画像を指定の差し込み方・位置でcanvasへ貼る。暗さは背景の上にだけ重ねる。"""
+    offset_x, offset_y = offset or (0, 0)
+    new_w, new_h, left, top = compute_background_placement(
+        image.width, image.height, fit_mode, offset_x, offset_y, canvas.width, canvas.height
     )
+    placed = image.convert("RGB").resize((new_w, new_h), Image.LANCZOS)
 
-    mask = Image.new("L", (diameter, diameter), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, diameter, diameter), fill=255)
+    opacity = max(0.0, min(overlay_opacity or 0.0, MAX_OVERLAY_OPACITY))
+    if opacity > 0:
+        placed = Image.blend(placed, Image.new("RGB", placed.size, (0, 0, 0)), opacity)
 
-    circular = Image.new("RGBA", (diameter, diameter))
-    circular.paste(image, (0, 0), mask=mask)
-    return circular
+    canvas.paste(placed, (left, top))
 
 
 def _split_tokens(paragraph: str):
@@ -268,52 +290,26 @@ def _draw_text_backgrounds(draw, text_items, bg_rgb):
         )
 
 
-def generate_story_image(
-    profile_image_url,
-    account_name,
+def render_story_text_layer(
     original_text,
     own_replies,
-    background_image=None,
     text_color=DEFAULT_TEXT_COLOR,
     text_bg_color=None,
     max_font_size=DEFAULT_MAX_FONT_SIZE,
-    overlay_opacity=0.0,
     font_key=DEFAULT_FONT_KEY,
 ):
     """
-    Threadsの投稿内容から1080x1920のInstagramストーリーズ用PNG画像を生成する。
+    本文・返信の文字（と文字の背景の帯）だけを描いた、1080x1920の透明な
+    RGBA画像を返す。背景は含まない。
 
     original_text・own_repliesの文字列は一切変更せず、そのまま描画する。
     文字量が多い場合、max_font_sizeを上限としてフォントサイズを自動的に縮小し、
     全文が画像内に収まるようにする（max_font_sizeより大きくすることはない）。
 
-    引数:
-        background_image: load_background_image()で読み込み済みのRGB画像、
-                           またはNone（Noneの場合は白背景を使用）。
-        text_color: 本文・アカウント名の文字色（"#RRGGBB"形式）。
-        text_bg_color: 文字の背景色（"#RRGGBB"形式）。
-                       None（既定値）の場合は文字背景を描画せず、
-                       これまでとまったく同じ見た目になる。
-        max_font_size: ユーザーが希望する本文フォントサイズの上限。
-        overlay_opacity: 背景画像の上に重ねる黒レイヤーの不透明度（0.0〜0.8）。
-                         background_imageがNoneの場合は無視される。
-        font_key: app_fonts.FONT_OPTIONSのいずれか。本文・アカウント名の
-                  両方に適用する（現状どちらも同じフォントを使っているため）。
-
-    戻り値: (PNGのバイト列, 警告メッセージ または None)
+    戻り値: (RGBA画像, 警告メッセージ または None)
     """
-    canvas = Image.new("RGBA", (CANVAS_WIDTH, CANVAS_HEIGHT), BACKGROUND_COLOR + (255,))
-
-    if background_image is not None:
-        covered = _cover_resize(background_image, CANVAS_WIDTH, CANVAS_HEIGHT)
-        canvas.paste(covered.convert("RGBA"), (0, 0))
-
-        opacity = max(0.0, min(overlay_opacity or 0.0, MAX_OVERLAY_OPACITY))
-        if opacity > 0:
-            overlay = Image.new("RGBA", canvas.size, (0, 0, 0, round(opacity * 255)))
-            canvas = Image.alpha_composite(canvas, overlay)
-
-    draw = ImageDraw.Draw(canvas)
+    layer = Image.new("RGBA", (CANVAS_WIDTH, CANVAS_HEIGHT), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
     text_rgb = _hex_to_rgb(text_color)
     text_bg_rgb = _hex_to_rgb(text_bg_color) if text_bg_color else None
 
@@ -321,15 +317,9 @@ def generate_story_image(
 
     blocks = [original_text or ""] + [r or "" for r in own_replies]
     # 「Arial」選択時に日本語が含まれるかどうかの判定用。
-    # アカウント名も本文もまとめて渡し、どちらかに日本語が含まれていれば
-    # 日本語対応フォントへ自動的に切り替える。
-    sample_text = (account_name or "") + "".join(blocks)
-    name_font = _load_font(NAME_FONT_SIZE, font_key=font_key, sample_text=sample_text)
+    sample_text = "".join(blocks)
 
-    header_height = max(PROFILE_DIAMETER, NAME_FONT_SIZE + 10)
-    available_height = (
-        CANVAS_HEIGHT - MARGIN_TOP - MARGIN_BOTTOM - header_height - SECTION_GAP
-    )
+    available_height = CANVAS_HEIGHT - MARGIN_TOP - MARGIN_BOTTOM
 
     font_size = max(MIN_BODY_FONT_SIZE, max_font_size or DEFAULT_MAX_FONT_SIZE)
     body_font = _load_font(font_size, font_key=font_key, sample_text=sample_text)
@@ -353,7 +343,7 @@ def generate_story_image(
             "画像が見づらい場合は、投稿を分けることをおすすめします。"
         )
 
-    # --- コンテンツ全体（アイコン＋アカウント名＋本文）の上下中央配置 ---
+    # --- 本文全体の上下中央配置 ---
     # 「最終的なフォントサイズを決める（自動縮小）→ その結果で高さを測る→
     #  中央位置を計算する」という順序を守るため、この計算は必ず自動縮小
     # ループより後（＝font_size・wrapped_blocks・total_heightが確定した後）
@@ -369,7 +359,7 @@ def generate_story_image(
     # 上へずれてしまう（＝下側の余白が実際より広く見える）。
     # そのため、最後の行についてだけ「枠の高さ」ではなく「実際に描画される
     # 高さ」に置き換えてから中央位置を計算する。
-    content_total_height = header_height + SECTION_GAP + total_height
+    content_total_height = total_height
     if wrapped_blocks and wrapped_blocks[-1]:
         ascent, descent = body_font.getmetrics()
         real_last_line_height = ascent + descent
@@ -382,28 +372,12 @@ def generate_story_image(
     # 極端に文章量が多く自動縮小しても収まりきらない場合は、これまで通り
     # 上（MARGIN_TOP）を基準にする（中央寄せしようとして上端がマージンより
     # 上にはみ出さないようにするための安全策）。
-    start_y = max(MARGIN_TOP, (CANVAS_HEIGHT - content_total_height) // 2)
-
-    # --- ヘッダー（プロフィール画像 + アカウント名） ---
-    profile_circle = _fetch_circular_profile_image(profile_image_url, PROFILE_DIAMETER)
-    header_y = start_y
-    if profile_circle:
-        canvas.paste(profile_circle, (MARGIN_X, header_y), mask=profile_circle)
-        name_x = MARGIN_X + PROFILE_DIAMETER + HEADER_GAP
-    else:
-        name_x = MARGIN_X
-
-    name_y = header_y + (PROFILE_DIAMETER - NAME_FONT_SIZE) // 2
+    y = max(MARGIN_TOP, (CANVAS_HEIGHT - content_total_height) // 2)
 
     # 文字の描画位置を先にすべて決めてから、
     # 「背景の帯 → 文字」の順に描画する（帯が文字を覆わないようにするため）。
-    text_items = [(name_x, name_y, account_name or "", name_font)]
-
-    # --- 本文・返信 ---
-    # line_heightは、上の中央配置計算で使ったものと必ず同じ値を使う
-    # （自動縮小ループの後に確定したfont_sizeから計算済みのものを再利用する）。
-    y = start_y + header_height + SECTION_GAP
-
+    # line_heightは、上の中央配置計算で使ったものと必ず同じ値を使う。
+    text_items = []
     for i, lines in enumerate(wrapped_blocks):
         for line in lines:
             text_items.append((MARGIN_X, y, line, body_font))
@@ -417,9 +391,61 @@ def generate_story_image(
     for item_x, item_y, line, item_font in text_items:
         draw.text((item_x, item_y), line, font=item_font, fill=text_rgb)
 
+    return layer, warning
+
+
+def image_to_png_bytes(image: Image.Image) -> bytes:
     buffer = io.BytesIO()
-    canvas.convert("RGB").save(buffer, format="PNG")
-    return buffer.getvalue(), warning
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def generate_story_image(
+    original_text,
+    own_replies,
+    background_image=None,
+    text_color=DEFAULT_TEXT_COLOR,
+    text_bg_color=None,
+    max_font_size=DEFAULT_MAX_FONT_SIZE,
+    overlay_opacity=0.0,
+    font_key=DEFAULT_FONT_KEY,
+    bg_fit=DEFAULT_BG_FIT,
+    bg_offset=(0, 0),
+):
+    """
+    Threadsの投稿内容から1080x1920のInstagramストーリーズ用PNG画像を生成する。
+
+    引数:
+        background_image: load_background_image()で読み込み済みのRGB画像、
+                           またはNone（Noneの場合は白背景を使用）。
+        text_color: 本文の文字色（"#RRGGBB"形式）。
+        text_bg_color: 文字の背景色（"#RRGGBB"形式）。
+                       None（既定値）の場合は文字背景を描画しない。
+        max_font_size: ユーザーが希望する本文フォントサイズの上限。
+        overlay_opacity: 背景画像の上に重ねる黒の不透明度（0.0〜0.8）。
+                         background_imageがNoneの場合は無視される。
+        font_key: app_fonts.FONT_OPTIONSのいずれか。
+        bg_fit: BG_FIT_WIDTH（横いっぱい）または BG_FIT_HEIGHT（縦いっぱい）。
+        bg_offset: 背景を中央からずらす量 (x, y)（キャンバスのpx）。
+
+    戻り値: (PNGのバイト列, 警告メッセージ または None)
+    """
+    canvas = Image.new("RGB", (CANVAS_WIDTH, CANVAS_HEIGHT), BACKGROUND_COLOR)
+
+    if background_image is not None:
+        _paste_background(canvas, background_image, bg_fit, bg_offset, overlay_opacity)
+
+    text_layer, warning = render_story_text_layer(
+        original_text,
+        own_replies,
+        text_color=text_color,
+        text_bg_color=text_bg_color,
+        max_font_size=max_font_size,
+        font_key=font_key,
+    )
+    canvas.paste(text_layer, (0, 0), mask=text_layer)
+
+    return image_to_png_bytes(canvas), warning
 
 
 DEFAULT_JPEG_QUALITY = 95

@@ -19,18 +19,32 @@ from cloudinary_storage import (
     CloudinaryError,
     delete_story_image,
     upload_story_image,
+    upload_story_video,
     verify_image_url,
+    verify_video_url,
 )
 from instagram_api import InstagramAPIError, get_instagram_credentials, post_story
 from reply_filters import filter_own_replies
 from story_image import (
+    BG_FIT_HEIGHT,
+    BG_FIT_WIDTH,
     DEFAULT_MAX_FONT_SIZE,
     DEFAULT_TEXT_BG_COLOR,
     DEFAULT_TEXT_COLOR,
     StoryImageError,
     convert_png_to_jpeg,
     generate_story_image,
+    image_to_png_bytes,
     load_background_image,
+    render_story_text_layer,
+)
+from story_preview import background_preview_data_url, story_preview, to_data_url
+from story_video import (
+    MAX_VIDEO_SECONDS,
+    VIDEO_EXTENSIONS,
+    is_video_filename,
+    load_video_poster,
+    render_story_video,
 )
 from styles import inject_custom_css
 from threads_api import (
@@ -40,7 +54,6 @@ from threads_api import (
     get_own_replies_in_order,
     get_post_detail,
     get_post_replies,
-    get_profile,
     is_threads_url,
     resolve_target_url,
 )
@@ -51,6 +64,9 @@ MODE_NOTE = "note 投稿用"
 
 TEXT_BG_MODE_NONE = "透明"
 TEXT_BG_MODE_COLOR = "色を設定"
+
+# ストーリーズ背景の差し込み方（表示名 -> story_imageの定数）。先頭がデフォルト。
+BG_FIT_CHOICES = {"横いっぱい": BG_FIT_WIDTH, "縦いっぱい": BG_FIT_HEIGHT}
 
 ACCOUNT_CHOICES = ["shin.coaching", "takuma_o369", "masa_life128"]
 
@@ -97,10 +113,49 @@ def _cached_load_background_image(file_bytes):
     return load_background_image(file_bytes)
 
 
+@st.cache_data(show_spinner=False, max_entries=3)
+def _cached_video_poster(bg_cache_key, _video_bytes, suffix):
+    """
+    背景動画から位置合わせ用の静止画と動画の長さを取り出す処理をキャッシュする。
+    動画本体は大きいのでハッシュ対象にせず、bg_cache_keyで区別する。
+    """
+    return load_video_poster(_video_bytes, suffix=suffix)
+
+
+@st.cache_data(show_spinner=False, max_entries=5)
+def _cached_preview_background(bg_cache_key, _background_image):
+    """プレビュー表示用に縮小した背景（data URL）をキャッシュする。"""
+    return background_preview_data_url(_background_image)
+
+
+@st.cache_data(show_spinner=False, max_entries=20)
+def _cached_story_text_layer(
+    original_text,
+    own_replies_tuple,
+    text_color,
+    text_bg_color,
+    max_font_size,
+    font_key,
+):
+    """
+    文字だけを描いた透明レイヤー（PNG）をキャッシュする。プレビューでは
+    背景の上に重ねて表示し、動画の書き出しでは動画の上に合成する。
+
+    戻り値: (PNGのバイト列, 警告メッセージ または None)
+    """
+    layer, warning = render_story_text_layer(
+        original_text,
+        list(own_replies_tuple),
+        text_color=text_color,
+        text_bg_color=text_bg_color,
+        max_font_size=max_font_size,
+        font_key=font_key,
+    )
+    return image_to_png_bytes(layer), warning
+
+
 @st.cache_data(show_spinner=False, max_entries=20)
 def _cached_story_image(
-    profile_image_url,
-    account_name,
     original_text,
     own_replies_tuple,
     bg_cache_key,
@@ -109,20 +164,17 @@ def _cached_story_image(
     max_font_size,
     overlay_opacity,
     font_key,
+    bg_fit,
+    bg_offset,
     _background_image,
 ):
     """
     generate_story_image()の結果をキャッシュする。
 
-    Story画面のデザイン設定を1つ変えるたびに、それ以外の設定が同じ
-    組み合わせであれば以前と同じ画像になる。すべての入力値が一致する
-    場合は再生成をスキップする。プレビュー・PNGダウンロード・
-    Instagram投稿は、この関数が返す同じ結果をそのまま使い続けるため、
-    表示内容がずれることはない。
+    すべての入力値が一致する場合は再生成をスキップする。PNGダウンロード・
+    Instagram投稿は、この関数が返す同じ結果をそのまま使う。
     """
     return generate_story_image(
-        profile_image_url=profile_image_url,
-        account_name=account_name,
         original_text=original_text,
         own_replies=list(own_replies_tuple),
         background_image=_background_image,
@@ -131,6 +183,8 @@ def _cached_story_image(
         max_font_size=max_font_size,
         overlay_opacity=overlay_opacity,
         font_key=font_key,
+        bg_fit=bg_fit,
+        bg_offset=bg_offset,
     )
 
 
@@ -387,6 +441,9 @@ if "ig_post_error" not in st.session_state:
     st.session_state.ig_post_error = None
 if "ig_post_debug_info" not in st.session_state:
     st.session_state.ig_post_debug_info = None
+if "story_video_export" not in st.session_state:
+    # 書き出し済みのストーリーズ動画 {"signature": 設定の識別子, "bytes": MP4}。
+    st.session_state.story_video_export = None
 if "carousel_page_ids" not in st.session_state:
     st.session_state.carousel_page_ids = []
 if "carousel_store" not in st.session_state:
@@ -451,12 +508,10 @@ if convert_clicked:
                     post_summary = find_post_by_permalink(access_token, resolved_url)
 
                     post = None
-                    profile = None
                     own_replies = []
 
                     if post_summary:
                         post = get_post_detail(post_summary["id"], access_token)
-                        profile = get_profile(access_token)
                         replies = get_post_replies(post["id"], access_token)
                         own_replies = get_own_replies_in_order(
                             replies, post.get("username", selected_account)
@@ -477,7 +532,6 @@ if convert_clicked:
                     st.success("Threadsから投稿情報を取得しました。")
 
                     account_name = post.get("username", selected_account)
-                    profile_image_url = (profile or {}).get("threads_profile_picture_url")
                     original_text = post.get("text", "")
                     reply_texts = [r.get("text", "") for r in own_replies]
 
@@ -485,12 +539,12 @@ if convert_clicked:
                         "mode": mode,
                         "account_label": selected_account,
                         "account_name": account_name,
-                        "profile_image_url": profile_image_url,
                         "original_text": original_text,
                         "reply_texts": reply_texts,
                     }
                     st.session_state.design_reset_id += 1
                     st.session_state.ig_post_confirm_pending = False
+                    st.session_state.story_video_export = None
 
                     if mode == MODE_INSTAGRAM:
                         # Story画像は下の「ストーリーズデザイン」欄で、現在の
@@ -522,10 +576,19 @@ if result and result["mode"] == MODE_INSTAGRAM:
         reset_id = st.session_state.design_reset_id
 
         bg_file = st.file_uploader(
-            "背景画像を選択（未指定の場合は白背景を使用します）",
-            type=["png", "jpg", "jpeg", "webp"],
+            "背景の画像・動画を選択（未指定の場合は白背景を使用します）",
+            type=["png", "jpg", "jpeg", "webp", *VIDEO_EXTENSIONS],
             key=f"story_bg_{reset_id}",
         )
+        bg_fit_label = st.radio(
+            "背景のサイズ",
+            list(BG_FIT_CHOICES),
+            index=0,
+            horizontal=True,
+            key=f"story_bg_fit_{reset_id}",
+            help="位置は、下のプレビューで背景をドラッグ（スマホではスライド）して調整できます。",
+        )
+        bg_fit = BG_FIT_CHOICES[bg_fit_label]
         overlay_percent = st.slider(
             "背景の暗さ",
             min_value=0,
@@ -572,64 +635,165 @@ if result and result["mode"] == MODE_INSTAGRAM:
         else:
             text_bg_color = None
 
-    # 背景画像はここで一度だけ読み込む。EXIF回転・RGB変換自体は
-    # _cached_load_background_image()がファイル内容ごとにキャッシュするため、
-    # 他のデザイン設定（文字サイズ・フォント等）を変えるだけの再実行では
-    # 同じファイルを読み込み直さない。
+    # 背景はここで一度だけ読み込む。動画の場合は、位置合わせ用の静止画を
+    # 1枚取り出して画像背景と同じように扱い、動画への合成は「動画を書き出す」
+    # を押したときだけ行う（デザイン設定を変えるたびに書き出すと重いため）。
     background_image = None
+    bg_is_video = False
+    bg_cache_key = None
     bg_file_bytes = bg_file.getvalue() if bg_file is not None else None
+    bg_suffix = ""
     if bg_file_bytes is not None:
+        bg_is_video = is_video_filename(bg_file.name)
+        bg_suffix = "." + bg_file.name.rsplit(".", 1)[-1].lower()
         try:
-            background_image = _cached_load_background_image(bg_file_bytes)
+            if bg_is_video:
+                # 動画は大きいので中身のハッシュは取らず、アップロードごとに
+                # 一意なfile_idでキャッシュを区別する。
+                bg_cache_key = f"video:{bg_file.file_id}"
+                background_image, video_duration = _cached_video_poster(
+                    bg_cache_key, bg_file_bytes, bg_suffix
+                )
+                if video_duration and video_duration > MAX_VIDEO_SECONDS:
+                    st.warning(
+                        f"ストーリーズの動画は最長{MAX_VIDEO_SECONDS}秒のため、"
+                        f"先頭の{MAX_VIDEO_SECONDS}秒だけを使用します。"
+                    )
+            else:
+                bg_cache_key = _background_cache_key(bg_file_bytes)
+                background_image = _cached_load_background_image(bg_file_bytes)
         except StoryImageError as e:
+            bg_is_video = False
             st.error(e.friendly_message)
             with st.expander("デバッグ情報（エラー詳細）"):
                 st.write(e.detail or "詳細情報はありません。")
 
-    # 「プレビューを更新」ボタンは使わず、上のデザイン設定（背景画像・背景の
-    # 暗さ・フォント・文字サイズ・文字色・文字の背景）を変更するたびに、
+    # 「プレビューを更新」ボタンは使わず、上のデザイン設定を変更するたびに、
     # Streamlitのwidget再実行の仕組みを利用して、現在の入力値からその場で
-    # Story画像を再生成する。Threads APIは呼ばず、ローカルのPillow処理のみ。
-    # 実際の生成結果は_cached_story_image()が入力値ごとにキャッシュしており、
-    # まったく同じ設定の組み合わせであれば再生成しない。
-    current_image_bytes = None
+    # 文字レイヤーを再生成する。Threads APIは呼ばず、ローカルのPillow処理のみ。
+    # プレビューは「背景」と「文字レイヤー」をブラウザ側で重ねて表示しており、
+    # 背景をドラッグした位置（bg_offset）が書き出しにそのまま使われる。
+    text_layer_png = None
     current_warning = None
     try:
-        current_image_bytes, current_warning = _cached_story_image(
-            profile_image_url=result["profile_image_url"],
-            account_name=result["account_name"],
+        text_layer_png, current_warning = _cached_story_text_layer(
             original_text=result["original_text"],
             own_replies_tuple=tuple(result["reply_texts"]),
-            bg_cache_key=_background_cache_key(bg_file_bytes),
             text_color=text_color,
             text_bg_color=text_bg_color,
             max_font_size=font_size,
-            overlay_opacity=overlay_percent / 100,
             font_key=story_font_choice,
-            _background_image=background_image,
         )
     except StoryImageError as e:
         st.error(e.friendly_message)
         with st.expander("デバッグ情報（エラー詳細）"):
             st.write(e.detail or "詳細情報はありません。")
 
-    if current_image_bytes:
+    # 投稿・ダウンロードの対象（画像ならPNG、動画なら書き出し済みのMP4）。
+    post_media_bytes = None
+    post_media_label = "動画" if bg_is_video else "画像"
+
+    if text_layer_png:
         if current_warning:
             st.warning(current_warning)
         st.markdown('<div class="tt-step-title">プレビュー</div>', unsafe_allow_html=True)
-        st.image(current_image_bytes, use_container_width=True)
-        st.download_button(
-            "PNGをダウンロード",
-            data=current_image_bytes,
-            file_name="threads_story.png",
-            mime="image/png",
-            use_container_width=True,
+        bg_offset = story_preview(
+            text_layer_url=to_data_url(text_layer_png, "image/png"),
+            bg_url=(
+                _cached_preview_background(bg_cache_key, background_image)
+                if background_image is not None
+                else None
+            ),
+            bg_size=background_image.size if background_image is not None else None,
+            fit=bg_fit,
+            shade=overlay_percent / 100,
+            token=f"{bg_cache_key}:{bg_fit}",
+            key=f"story_preview_{reset_id}",
         )
 
-        # Instagramへの投稿にも、常にこの（現在の設定から今まさに生成した）
-        # current_image_bytesを使う。古いsession_stateの画像を誤って
+        if bg_is_video:
+            st.caption(
+                "プレビューは動画の1コマを表示しています。"
+                "位置を決めたら「動画を書き出す」を押してください。"
+            )
+            video_signature = hashlib.sha256(
+                repr(
+                    (
+                        bg_cache_key,
+                        hashlib.sha256(text_layer_png).hexdigest(),
+                        bg_fit,
+                        bg_offset,
+                        overlay_percent,
+                    )
+                ).encode()
+            ).hexdigest()
+
+            if st.button("動画を書き出す", key="story_video_export_button", use_container_width=True):
+                try:
+                    with st.spinner("動画を書き出しています（動画の長さによっては数分かかります）..."):
+                        st.session_state.story_video_export = {
+                            "signature": video_signature,
+                            "bytes": render_story_video(
+                                bg_file_bytes,
+                                text_layer_png,
+                                background_image.size,
+                                bg_fit=bg_fit,
+                                bg_offset=bg_offset,
+                                overlay_opacity=overlay_percent / 100,
+                                suffix=bg_suffix,
+                            ),
+                        }
+                except StoryImageError as e:
+                    st.error(e.friendly_message)
+                    with st.expander("デバッグ情報（エラー詳細）"):
+                        st.code(e.detail or "詳細情報はありません。")
+
+            video_export = st.session_state.story_video_export
+            if video_export and video_export["signature"] == video_signature:
+                post_media_bytes = video_export["bytes"]
+                st.video(post_media_bytes)
+                st.download_button(
+                    "MP4をダウンロード",
+                    data=post_media_bytes,
+                    file_name="threads_story.mp4",
+                    mime="video/mp4",
+                    use_container_width=True,
+                )
+            elif video_export:
+                st.info("設定が変更されました。もう一度「動画を書き出す」を押してください。")
+        else:
+            try:
+                post_media_bytes, _ = _cached_story_image(
+                    original_text=result["original_text"],
+                    own_replies_tuple=tuple(result["reply_texts"]),
+                    bg_cache_key=bg_cache_key,
+                    text_color=text_color,
+                    text_bg_color=text_bg_color,
+                    max_font_size=font_size,
+                    overlay_opacity=overlay_percent / 100,
+                    font_key=story_font_choice,
+                    bg_fit=bg_fit,
+                    bg_offset=bg_offset,
+                    _background_image=background_image,
+                )
+            except StoryImageError as e:
+                st.error(e.friendly_message)
+                with st.expander("デバッグ情報（エラー詳細）"):
+                    st.write(e.detail or "詳細情報はありません。")
+            else:
+                st.download_button(
+                    "PNGをダウンロード",
+                    data=post_media_bytes,
+                    file_name="threads_story.png",
+                    mime="image/png",
+                    use_container_width=True,
+                )
+
+    if post_media_bytes:
+        # Instagramへの投稿にも、常にこの（現在の設定から書き出した）
+        # post_media_bytesを使う。古い設定の画像・動画を誤って
         # 投稿してしまうことがないようにするため。
-        current_image_hash = hashlib.sha256(current_image_bytes).hexdigest()
+        current_image_hash = hashlib.sha256(post_media_bytes).hexdigest()
         already_posted = st.session_state.last_posted_image_hash == current_image_hash
 
         if st.session_state.ig_post_success_message:
@@ -650,7 +814,7 @@ if result and result["mode"] == MODE_INSTAGRAM:
                 verify_result = debug_info.get("verify_result")
                 if verify_result:
                     st.write(
-                        "画像取得テスト:",
+                        "公開URL取得テスト:",
                         f"HTTPステータス {verify_result['status_code']} / "
                         f"Content-Type {verify_result['content_type']} / "
                         f"{verify_result['byte_count']}バイト",
@@ -678,11 +842,11 @@ if result and result["mode"] == MODE_INSTAGRAM:
             else:
                 if already_posted:
                     st.warning(
-                        "この画像は既にInstagramへ投稿済みです。"
-                        "同じ画像を再投稿する場合のみ「投稿する」を押してください。"
+                        f"この{post_media_label}は既にInstagramへ投稿済みです。"
+                        f"同じ{post_media_label}を再投稿する場合のみ「投稿する」を押してください。"
                     )
                 st.warning(
-                    f"この画像を「{result['account_label']}」の"
+                    f"この{post_media_label}を「{result['account_label']}」の"
                     "Instagramストーリーズへ投稿しますか？"
                 )
                 confirm_col, cancel_col = st.columns(2)
@@ -708,20 +872,28 @@ if result and result["mode"] == MODE_INSTAGRAM:
                     ig_trace = debug_info["instagram_trace"]
                     try:
                         with st.spinner("Instagramへ投稿しています..."):
-                            jpeg_bytes = convert_png_to_jpeg(current_image_bytes)
-                            image_url, public_id = upload_story_image(jpeg_bytes)
-                            debug_info["cloudinary_url"] = image_url
+                            if bg_is_video:
+                                media_url, public_id = upload_story_video(post_media_bytes)
+                            else:
+                                jpeg_bytes = convert_png_to_jpeg(post_media_bytes)
+                                media_url, public_id = upload_story_image(jpeg_bytes)
+                            debug_info["cloudinary_url"] = media_url
 
                             # Instagramに渡す前に、公開URLが実際に取得できる
-                            # 正常なJPEGになっているかを確認する（CDN反映待ちを考慮）。
-                            verify_result = verify_image_url(image_url)
+                            # 正常なファイルになっているかを確認する（CDN反映待ちを考慮）。
+                            verify_result = (
+                                verify_video_url(media_url)
+                                if bg_is_video
+                                else verify_image_url(media_url)
+                            )
                             debug_info["verify_result"] = verify_result
 
                             post_story(
                                 ig_credentials["ig_user_id"],
                                 ig_credentials["access_token"],
-                                image_url,
+                                media_url,
                                 trace=ig_trace,
+                                is_video=bg_is_video,
                             )
                     except CloudinaryError as e:
                         st.session_state.ig_post_error = {
@@ -735,13 +907,15 @@ if result and result["mode"] == MODE_INSTAGRAM:
                         }
                     except Exception as e:
                         st.session_state.ig_post_error = {
-                            "message": "投稿用画像の準備に失敗しました。もう一度お試しください。",
+                            "message": f"投稿用{post_media_label}の準備に失敗しました。もう一度お試しください。",
                             "detail": str(e),
                         }
                     else:
                         # Instagram側でのメディアコンテナ作成・公開がすべて成功した後にのみ、
-                        # Cloudinaryの一時画像を削除する。削除に失敗しても投稿自体は成功として扱う。
-                        delete_story_image(public_id)
+                        # Cloudinaryの一時ファイルを削除する。削除に失敗しても投稿自体は成功として扱う。
+                        delete_story_image(
+                            public_id, resource_type="video" if bg_is_video else "image"
+                        )
                         st.session_state.last_posted_image_hash = current_image_hash
                         st.session_state.ig_post_success_message = (
                             "Instagramストーリーズへの投稿が完了しました。"

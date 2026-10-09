@@ -50,6 +50,78 @@ UI表示名: 手書き風書体
 ライセンス: SIL Open Font License, Version 1.1
             → Yomogi-OFL.txt
 --------------------------------------------------------------------
+UI表示名: 太ゴシック
+ファイル: ZenKakuGothicNew-Bold.ttf
+フォント名: Zen Kaku Gothic New (Bold)
+配布元: https://github.com/google/fonts/tree/main/ofl/zenkakugothicnew (Google Fonts)
+ライセンス: SIL Open Font License, Version 1.1
+            → ZenKakuGothicNew-OFL.txt
+--------------------------------------------------------------------
+UI表示名: 丸ゴシック
+ファイル: ZenMaruGothic-Regular.ttf
+フォント名: Zen Maru Gothic
+配布元: https://github.com/google/fonts/tree/main/ofl/zenmarugothic (Google Fonts)
+ライセンス: SIL Open Font License, Version 1.1
+            → ZenMaruGothic-OFL.txt
+--------------------------------------------------------------------
+UI表示名: 太丸ゴシック
+ファイル: MPLUSRounded1c-Bold.ttf
+フォント名: M PLUS Rounded 1c (Bold)
+配布元: https://github.com/google/fonts/tree/main/ofl/mplusrounded1c (Google Fonts)
+ライセンス: SIL Open Font License, Version 1.1
+            → MPLUSRounded1c-OFL.txt
+注記: 配布元フォルダにOFL.txtが同梱されていないため、配布元の
+      METADATA.pbに記載の著作権表示とOFL 1.1の条文から作成。
+--------------------------------------------------------------------
+UI表示名: オールド明朝
+ファイル: ZenOldMincho-Regular.ttf
+フォント名: Zen Old Mincho
+配布元: https://github.com/google/fonts/tree/main/ofl/zenoldmincho (Google Fonts)
+ライセンス: SIL Open Font License, Version 1.1
+            → ZenOldMincho-OFL.txt
+--------------------------------------------------------------------
+UI表示名: 太明朝
+ファイル: ZenOldMincho-Bold.ttf
+フォント名: Zen Old Mincho (Bold)
+配布元: https://github.com/google/fonts/tree/main/ofl/zenoldmincho (Google Fonts)
+ライセンス: SIL Open Font License, Version 1.1
+            → ZenOldMincho-OFL.txt
+--------------------------------------------------------------------
+UI表示名: 装飾明朝
+ファイル: KaiseiDecol-Regular.ttf
+フォント名: Kaisei Decol
+配布元: https://github.com/google/fonts/tree/main/ofl/kaiseidecol (Google Fonts)
+ライセンス: SIL Open Font License, Version 1.1
+            → KaiseiDecol-OFL.txt
+--------------------------------------------------------------------
+UI表示名: 極太ゴシック
+ファイル: DelaGothicOne-Regular.ttf
+フォント名: Dela Gothic One
+配布元: https://github.com/google/fonts/tree/main/ofl/delagothicone (Google Fonts)
+ライセンス: SIL Open Font License, Version 1.1
+            → DelaGothicOne-OFL.txt
+--------------------------------------------------------------------
+UI表示名: ポップ体
+ファイル: RocknRollOne-Regular.ttf
+フォント名: RocknRoll One
+配布元: https://github.com/google/fonts/tree/main/ofl/rocknrollone (Google Fonts)
+ライセンス: SIL Open Font License, Version 1.1
+            → RocknRollOne-OFL.txt
+--------------------------------------------------------------------
+UI表示名: ペン字風
+ファイル: ZenKurenaido-Regular.ttf
+フォント名: Zen Kurenaido
+配布元: https://github.com/google/fonts/tree/main/ofl/zenkurenaido (Google Fonts)
+ライセンス: SIL Open Font License, Version 1.1
+            → ZenKurenaido-OFL.txt
+--------------------------------------------------------------------
+UI表示名: マジック手書き
+ファイル: YuseiMagic-Regular.ttf
+フォント名: Yusei Magic
+配布元: https://github.com/google/fonts/tree/main/ofl/yuseimagic (Google Fonts)
+ライセンス: SIL Open Font License, Version 1.1
+            → YuseiMagic-OFL.txt
+--------------------------------------------------------------------
 
 各フォントの完全なライセンス条文は、同じフォルダ内の
 「<フォント名>-OFL.txt」または「IPA_Font_License_Agreement_v1.0.txt」を

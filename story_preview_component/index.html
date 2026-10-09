@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; }
+  body { font-family: "Hiragino Sans", "Yu Gothic", "Noto Sans JP", sans-serif; color: #3B2E27; }
+  /* スマホでは左右に余白を残し、そこを触ればページを縦スクロールできるようにする
+     （プレビュー自体は背景のドラッグ操作に使うため）。 */
+  #stage {
+    position: relative; overflow: hidden; margin: 0 auto;
+    width: 82%; max-width: 420px;
+    border-radius: 10px; box-shadow: 0 1px 6px rgba(59, 46, 39, 0.25);
+    user-select: none; -webkit-user-select: none;
+  }
+  #stage.movable { cursor: grab; touch-action: none; }
+  #stage.dragging { cursor: grabbing; }
+  #bg { position: absolute; display: none; }
+  #bg img { display: block; width: 100%; height: 100%; pointer-events: none; -webkit-user-drag: none; }
+  #shade { position: absolute; inset: 0; background: #000; opacity: 0; pointer-events: none; }
+  #text { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; -webkit-user-drag: none; }
+  #footer {
+    display: none; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap;
+    padding: 8px 4px 2px; font-size: 12.5px; line-height: 1.5; text-align: center;
+  }
+  #reset {
+    font: inherit; color: inherit; background: #FBF6EC; border: 1px solid #C9B8A4;
+    border-radius: 6px; padding: 2px 10px; cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="bg"><img id="bgimg" alt=""><div id="shade"></div></div>
+  <img id="text" alt="">
+</div>
+<div id="footer">
+  <span>背景をドラッグ（スマホではスライド）して位置を調整できます</span>
+  <button id="reset" type="button">位置をリセット</button>
+</div>
+<script>
+(function () {
+  var stage = document.getElementById("stage");
+  var bg = document.getElementById("bg");
+  var bgimg = document.getElementById("bgimg");
+  var shade = document.getElementById("shade");
+  var text = document.getElementById("text");
+  var footer = document.getElementById("footer");
+
+  var args = null;
+  var token = null;      // 背景・差し込み方が変わったら位置を中央へ戻すための識別子
+  var offset = { x: 0, y: 0 };  // 中央からのずれ（キャンバスのpx）
+  var drag = null;
+
+  function send(type, data) {
+    window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data || {}), "*");
+  }
+
+  // story_image.compute_background_placement() と同じ式。
+  function placement() {
+    var cw = args.canvas_w, ch = args.canvas_h;
+    var scale = args.fit === "height" ? ch / args.bg_h : cw / args.bg_w;
+    var w = Math.max(1, Math.round(args.bg_w * scale));
+    var h = Math.max(1, Math.round(args.bg_h * scale));
+    var maxX = Math.abs(cw - w) / 2, maxY = Math.abs(ch - h) / 2;
+    offset.x = Math.max(-maxX, Math.min(maxX, offset.x));
+    offset.y = Math.max(-maxY, Math.min(maxY, offset.y));
+    return { w: w, h: h, left: (cw - w) / 2 + offset.x, top: (ch - h) / 2 + offset.y, maxX: maxX, maxY: maxY };
+  }
+
+  function layout() {
+    if (!args) return;
+    var width = stage.clientWidth;
+    var f = width / args.canvas_w;
+    stage.style.height = Math.round(args.canvas_h * f) + "px";
+    stage.style.background = args.canvas_color;
+
+    var movable = false;
+    if (args.bg) {
+      var p = placement();
+      bg.style.display = "block";
+      bg.style.width = p.w * f + "px";
+      bg.style.height = p.h * f + "px";
+      bg.style.left = p.left * f + "px";
+      bg.style.top = p.top * f + "px";
+      shade.style.opacity = args.shade;
+      movable = p.maxX >= 1 || p.maxY >= 1;
+    } else {
+      bg.style.display = "none";
+    }
+    stage.classList.toggle("movable", movable);
+    footer.style.display = movable ? "flex" : "none";
+    send("streamlit:setFrameHeight", { height: document.documentElement.scrollHeight });
+  }
+
+  function commit() {
+    send("streamlit:setComponentValue", {
+      value: { x: Math.round(offset.x), y: Math.round(offset.y), token: token },
+      dataType: "json"
+    });
+  }
+
+  stage.addEventListener("pointerdown", function (e) {
+    if (!stage.classList.contains("movable")) return;
+    drag = { px: e.clientX, py: e.clientY, x: offset.x, y: offset.y };
+    stage.setPointerCapture(e.pointerId);
+    stage.classList.add("dragging");
+    e.preventDefault();
+  });
+  stage.addEventListener("pointermove", function (e) {
+    if (!drag) return;
+    var f = stage.clientWidth / args.canvas_w;
+    offset.x = drag.x + (e.clientX - drag.px) / f;
+    offset.y = drag.y + (e.clientY - drag.py) / f;
+    layout();
+  });
+  function endDrag() {
+    if (!drag) return;
+    var moved = Math.round(drag.x) !== Math.round(offset.x) || Math.round(drag.y) !== Math.round(offset.y);
+    drag = null;
+    stage.classList.remove("dragging");
+    if (moved) commit();
+  }
+  stage.addEventListener("pointerup", endDrag);
+  stage.addEventListener("pointercancel", endDrag);
+
+  document.getElementById("reset").addEventListener("click", function () {
+    offset = { x: 0, y: 0 };
+    layout();
+    commit();
+  });
+
+  window.addEventListener("message", function (e) {
+    if (!e.data || e.data.type !== "streamlit:render") return;
+    args = e.data.args;
+    if (args.token !== token) {
+      token = args.token;
+      offset = { x: 0, y: 0 };
+    }
+    if (args.bg && bgimg.getAttribute("src") !== args.bg) bgimg.src = args.bg;
+    if (text.getAttribute("src") !== args.text) text.src = args.text;
+    layout();
+  });
+  window.addEventListener("resize", layout);
+
+  send("streamlit:componentReady", { apiVersion: 1 });
+})();
+</script>
+</body>
+</html>

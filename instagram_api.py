@@ -29,6 +29,8 @@ API_BASE = f"https://graph.instagram.com/{GRAPH_API_VERSION}"
 # メディアコンテナの処理完了を待つ設定（無限ループにしないための上限つき）
 STATUS_POLL_INTERVAL_SECONDS = 3
 STATUS_MAX_WAIT_SECONDS = 60
+# 動画はInstagram側での変換に時間がかかるため、画像より長く待つ。
+VIDEO_STATUS_MAX_WAIT_SECONDS = 300
 
 REQUEST_TIMEOUT_SECONDS = 30
 
@@ -122,20 +124,20 @@ def _request(method, url, params, trace=None, step=""):
 
 
 def create_story_container(
-    ig_user_id: str, access_token: str, image_url: str, trace=None
+    ig_user_id: str, access_token: str, media_url: str, trace=None, is_video: bool = False
 ) -> str:
     """
-    公開URLの画像から、Story投稿用のメディアコンテナを作成し、
-    コンテナID（creation_id）を返す。
+    公開URLの画像（is_video=Trueなら動画）から、Story投稿用のメディアコンテナを
+    作成し、コンテナID（creation_id）を返す。
 
-    image_urlは前後の空白を取り除いてから使用する
+    media_urlは前後の空白を取り除いてから使用する
     （余計な文字が連結されたまま送られることを防ぐため）。
     """
-    image_url = (image_url or "").strip()
+    media_url = (media_url or "").strip()
 
     url = f"{API_BASE}/{ig_user_id}/media"
     params = {
-        "image_url": image_url,
+        "video_url" if is_video else "image_url": media_url,
         "media_type": "STORIES",
         "access_token": access_token,
     }
@@ -150,7 +152,9 @@ def create_story_container(
     return container_id
 
 
-def wait_until_container_ready(container_id: str, access_token: str, trace=None) -> None:
+def wait_until_container_ready(
+    container_id: str, access_token: str, trace=None, max_wait_seconds=STATUS_MAX_WAIT_SECONDS
+) -> None:
     """
     メディアコンテナの処理状況（status_code）を確認し、
     FINISHEDになるまで待つ。
@@ -175,11 +179,11 @@ def wait_until_container_ready(container_id: str, access_token: str, trace=None)
                 detail=f"メディアコンテナの処理でエラーが発生しました: {data}",
             )
 
-        if waited_seconds >= STATUS_MAX_WAIT_SECONDS:
+        if waited_seconds >= max_wait_seconds:
             raise InstagramAPIError(
                 "Instagramへの投稿に失敗しました。時間をおいて再度お試しください。",
                 detail=(
-                    f"メディアコンテナの処理が{STATUS_MAX_WAIT_SECONDS}秒以内に"
+                    f"メディアコンテナの処理が{max_wait_seconds}秒以内に"
                     f"完了しませんでした（最終状態: {status_code}）。"
                 ),
             )
@@ -201,9 +205,12 @@ def publish_story(ig_user_id: str, access_token: str, container_id: str, trace=N
     return data.get("id")
 
 
-def post_story(ig_user_id: str, access_token: str, image_url: str, trace=None) -> str:
+def post_story(
+    ig_user_id: str, access_token: str, media_url: str, trace=None, is_video: bool = False
+) -> str:
     """
-    画像の公開URLから、Instagramストーリーズへの投稿を最後まで行う。
+    画像（is_video=Trueなら動画）の公開URLから、Instagramストーリーズへの
+    投稿を最後まで行う。
 
     1. メディアコンテナを作成
     2. 処理が完了する（FINISHED）まで待つ
@@ -214,6 +221,13 @@ def post_story(ig_user_id: str, access_token: str, image_url: str, trace=None) -
 
     戻り値: 公開されたメディアのID
     """
-    container_id = create_story_container(ig_user_id, access_token, image_url, trace=trace)
-    wait_until_container_ready(container_id, access_token, trace=trace)
+    container_id = create_story_container(
+        ig_user_id, access_token, media_url, trace=trace, is_video=is_video
+    )
+    wait_until_container_ready(
+        container_id,
+        access_token,
+        trace=trace,
+        max_wait_seconds=VIDEO_STATUS_MAX_WAIT_SECONDS if is_video else STATUS_MAX_WAIT_SECONDS,
+    )
     return publish_story(ig_user_id, access_token, container_id, trace=trace)

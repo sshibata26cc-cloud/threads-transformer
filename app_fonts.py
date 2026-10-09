@@ -33,6 +33,17 @@ FONT_FILES = {
     "ゴシック": "ipaexg.ttf",  # IPAexゴシック（既存フォント。表示名のみ変更）
     "Arial": "Arimo-Regular.ttf",  # Arimo（Arial互換のSans。日本語グリフなし）
     "手書き風書体": "Yomogi-Regular.ttf",  # Yomogi（手書き風の代替）
+    # ここから下は追加フォント（すべて日本語対応・SIL OFL）。
+    "太ゴシック": "ZenKakuGothicNew-Bold.ttf",  # Zen Kaku Gothic New Bold
+    "丸ゴシック": "ZenMaruGothic-Regular.ttf",  # Zen Maru Gothic
+    "太丸ゴシック": "MPLUSRounded1c-Bold.ttf",  # M PLUS Rounded 1c Bold
+    "オールド明朝": "ZenOldMincho-Regular.ttf",  # Zen Old Mincho
+    "太明朝": "ZenOldMincho-Bold.ttf",  # Zen Old Mincho Bold
+    "装飾明朝": "KaiseiDecol-Regular.ttf",  # Kaisei Decol
+    "極太ゴシック": "DelaGothicOne-Regular.ttf",  # Dela Gothic One
+    "ポップ体": "RocknRollOne-Regular.ttf",  # RocknRoll One
+    "ペン字風": "ZenKurenaido-Regular.ttf",  # Zen Kurenaido
+    "マジック手書き": "YuseiMagic-Regular.ttf",  # Yusei Magic
 }
 
 # 選択肢の表示順（Streamlitのselectboxにそのまま渡す）。
