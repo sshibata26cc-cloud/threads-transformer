@@ -73,6 +73,34 @@ MODE_NOTE = "note 投稿用"
 TEXT_BG_MODE_NONE = "透明"
 TEXT_BG_MODE_COLOR = "色を設定"
 
+# 完成画像（右クリック / 長押しで保存する用）の表示。
+SAVE_IMAGE_HINT = "画像を右クリック（スマホは長押し）すると、そのまま画像として保存できます。"
+SAVE_IMAGE_WIDTH = 320
+
+
+def _show_saveable_image(png_bytes, key, caption=None):
+    """
+    完成画像を、右クリック / 長押しで保存できる通常の画像として表示する。
+
+    st.imageにwidthを数値で渡すと、Streamlitがその幅に縮小したJPEGを配信して
+    しまい、保存した画像の解像度が落ちる。そのため画像は元の解像度のPNGの
+    まま配信し、画面上の表示サイズだけをCSSで小さくする。
+    """
+    st.markdown(
+        f"""
+        <style>
+        [class*="st-key-tt_save_image_"] img {{
+            width: {SAVE_IMAGE_WIDTH}px !important;
+            max-width: 100% !important;
+            height: auto !important;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    with st.container(key=f"tt_save_image_{key}"):
+        st.image(png_bytes, caption=caption, output_format="PNG")
+
 # ストーリーズ背景の差し込み方（表示名 -> story_imageの定数）。先頭がデフォルト。
 BG_FIT_CHOICES = {"横いっぱい": BG_FIT_WIDTH, "縦いっぱい": BG_FIT_HEIGHT}
 
@@ -870,13 +898,15 @@ if result and result["mode"] == MODE_INSTAGRAM:
                 with st.expander("デバッグ情報（エラー詳細）"):
                     st.write(e.detail or "詳細情報はありません。")
             else:
-                st.download_button(
-                    "PNGをダウンロード",
-                    data=post_media_bytes,
-                    file_name="threads_story.png",
-                    mime="image/png",
-                    use_container_width=True,
+                # 完成画像は、ダウンロードボタンではなく通常の画像として表示し、
+                # 右クリック（スマホは長押し）でそのまま保存できるようにする。
+                # 上のプレビューは背景のドラッグ操作用に層を重ねた表示で、
+                # 1枚の画像としては保存できないため、別に表示している。
+                st.markdown(
+                    '<div class="tt-step-title">完成画像</div>', unsafe_allow_html=True
                 )
+                st.caption(SAVE_IMAGE_HINT)
+                _show_saveable_image(post_media_bytes, key="story")
 
     if post_media_bytes:
         # Instagramへの投稿にも、常にこの（現在の設定から書き出した）
@@ -1354,8 +1384,8 @@ elif result and result["mode"] == MODE_CAROUSEL:
         # 関係なく、常に全ページを表示する）。
         inject_carousel_card_css(selected_id)
 
-        selected_image_bytes = None
         selected_warning = None
+        all_page_images = []  # 保存用の一覧に並べる (ページ番号, PNG)
 
         with st.container(horizontal=True, wrap=False, key="carousel_thumb_row"):
             for pid in page_ids:
@@ -1374,8 +1404,9 @@ elif result and result["mode"] == MODE_CAROUSEL:
                                 st.write(e.detail or "詳細情報はありません。")
 
                     if is_selected:
-                        selected_image_bytes = page_image_bytes
                         selected_warning = page_warning
+                    if page_image_bytes:
+                        all_page_images.append((page_ids.index(pid) + 1, page_image_bytes))
 
                     if page_image_bytes:
                         # 画像そのものの生成サイズは1080x1350のまま。
@@ -1404,15 +1435,17 @@ elif result and result["mode"] == MODE_CAROUSEL:
         if selected_warning:
             st.warning(selected_warning)
 
-        if selected_image_bytes:
-            st.download_button(
-                f"ページ{selected_index + 1}のPNGをダウンロード",
-                data=selected_image_bytes,
-                file_name=f"threads_carousel_{selected_index + 1}.png",
-                mime="image/png",
-                use_container_width=True,
-                key=f"carousel_download_{selected_id}",
-            )
+        # 完成画像は、ダウンロードボタンではなく通常の画像として全ページぶん
+        # 並べ、右クリック（スマホは長押し）でそのまま保存できるようにする。
+        # 上のカードは長押しが並び替えのドラッグに使われるため、保存用は
+        # 別に表示している。
+        if all_page_images:
+            with st.expander(f"画像を保存する（全{len(all_page_images)}ページ）"):
+                st.caption(SAVE_IMAGE_HINT)
+                for page_number, page_png in all_page_images:
+                    _show_saveable_image(
+                        page_png, key=f"carousel_{page_number}", caption=f"ページ {page_number}"
+                    )
 
         # 全ページ共通で1つだけ使い回す編集欄。keyは選択中ページIDではなく
         # 固定文字列にし、実際の本文はcarousel_storeとの同期処理（このブロックの
