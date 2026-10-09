@@ -38,8 +38,9 @@ from story_image import (
     generate_story_image,
     image_to_png_bytes,
     load_background_image,
-    render_story_text_layer,
+    render_story_text_layer_with_layout,
 )
+from story_pages import ACTION_NEWLINE, ACTION_PAGEBREAK, apply_text_action, initial_pages
 from story_preview import (
     background_fill_data_url,
     background_preview_data_url,
@@ -109,6 +110,8 @@ ACCOUNT_CHOICES = ["shin.coaching", "takuma_o369", "masa_life128"]
 # カルーセルのUndo/Redo履歴として保持する最大件数。
 # これを超えたら、最も古い履歴から削除する。
 CAROUSEL_HISTORY_LIMIT = 20
+# ストーリーズの改行・改ページの「元に戻す」履歴として保持する最大件数。
+STORY_HISTORY_LIMIT = 30
 
 
 # --------------------------------------------------------------------
@@ -194,36 +197,29 @@ def _cached_preview_background(bg_cache_key, _background_image):
     )
 
 
-@st.cache_data(show_spinner=False, max_entries=20)
-def _cached_story_text_layer(
-    original_text,
-    own_replies_tuple,
-    text_color,
-    text_bg_color,
-    max_font_size,
-    font_key,
-):
+@st.cache_data(show_spinner=False, max_entries=60)
+def _cached_story_text_layer(page_text, text_color, text_bg_color, max_font_size, font_key):
     """
-    文字だけを描いた透明レイヤー（PNG）をキャッシュする。プレビューでは
-    背景の上に重ねて表示し、動画の書き出しでは動画の上に合成する。
+    ストーリーズ1ページぶんの、文字だけを描いた透明レイヤー（PNG）をキャッシュする。
+    プレビューでは背景の上に重ねて表示し、動画の書き出しでは動画の上に合成する。
 
-    戻り値: (PNGのバイト列, 警告メッセージ または None)
+    戻り値: (PNGのバイト列, 警告メッセージ または None, 行ごとの配置情報)
+    配置情報は、プレビュー上で文字の間にカーソルを置くために使う。
     """
-    layer, warning = render_story_text_layer(
-        original_text,
-        list(own_replies_tuple),
+    layer, warning, layout = render_story_text_layer_with_layout(
+        page_text,
+        [],
         text_color=text_color,
         text_bg_color=text_bg_color,
         max_font_size=max_font_size,
         font_key=font_key,
     )
-    return image_to_png_bytes(layer), warning
+    return image_to_png_bytes(layer), warning, layout
 
 
-@st.cache_data(show_spinner=False, max_entries=20)
+@st.cache_data(show_spinner=False, max_entries=60)
 def _cached_story_image(
-    original_text,
-    own_replies_tuple,
+    page_text,
     bg_cache_key,
     text_color,
     text_bg_color,
@@ -235,14 +231,14 @@ def _cached_story_image(
     _background_image,
 ):
     """
-    generate_story_image()の結果をキャッシュする。
+    ストーリーズ1ページぶんのgenerate_story_image()の結果をキャッシュする。
 
-    すべての入力値が一致する場合は再生成をスキップする。PNGダウンロード・
+    すべての入力値が一致する場合は再生成をスキップする。完成画像の表示・
     Instagram投稿は、この関数が返す同じ結果をそのまま使う。
     """
     return generate_story_image(
-        original_text=original_text,
-        own_replies=list(own_replies_tuple),
+        original_text=page_text,
+        own_replies=[],
         background_image=_background_image,
         text_color=text_color,
         text_bg_color=text_bg_color,
@@ -508,8 +504,11 @@ if "ig_post_error" not in st.session_state:
 if "ig_post_debug_info" not in st.session_state:
     st.session_state.ig_post_debug_info = None
 if "story_video_export" not in st.session_state:
-    # 書き出し済みのストーリーズ動画 {"signature": 設定の識別子, "bytes": MP4}。
+    # 書き出し済みのストーリーズ動画 {"signature": 設定の識別子, "videos": ページ順のMP4}。
     st.session_state.story_video_export = None
+if "story_edit" not in st.session_state:
+    # ストーリーズの改行・改ページの編集状態（ストーリーズデザイン欄で初期化する）。
+    st.session_state.story_edit = None
 if "carousel_page_ids" not in st.session_state:
     st.session_state.carousel_page_ids = []
 if "carousel_store" not in st.session_state:
@@ -779,32 +778,52 @@ if result and result["mode"] == MODE_INSTAGRAM:
             with st.expander("デバッグ情報（エラー詳細）"):
                 st.write(e.detail or "詳細情報はありません。")
 
+    # --- ページ（改行・改ページの編集結果）の状態 ---
+    # 変換し直すたび（reset_idが変わるたび）に、本文と返信をつないだ1ページへ戻す。
+    story_edit = st.session_state.story_edit
+    if story_edit is None or story_edit["reset_id"] != reset_id:
+        story_edit = {
+            "reset_id": reset_id,
+            "pages": initial_pages(result["original_text"], result["reply_texts"]),
+            "index": 0,
+            "history": [],  # 「元に戻す」用。操作前の (pages, index) を積む
+            "last_nonce": None,
+        }
+        st.session_state.story_edit = story_edit
+    story_pages = story_edit["pages"]
+    story_page_index = min(story_edit["index"], len(story_pages) - 1)
+    story_page_count = len(story_pages)
+
     # 「プレビューを更新」ボタンは使わず、上のデザイン設定を変更するたびに、
     # Streamlitのwidget再実行の仕組みを利用して、現在の入力値からその場で
     # 文字レイヤーを再生成する。Threads APIは呼ばず、ローカルのPillow処理のみ。
     # プレビューは「背景」と「文字レイヤー」をブラウザ側で重ねて表示しており、
     # 背景をドラッグした位置（bg_offset）が書き出しにそのまま使われる。
-    text_layer_png = None
-    current_warning = None
+    # 文字レイヤーは全ページぶん作る（プレビューに出すのは表示中の1ページ）。
+    page_layers = []  # ページごとの (文字レイヤーPNG, 警告, 配置情報)
     try:
-        text_layer_png, current_warning = _cached_story_text_layer(
-            original_text=result["original_text"],
-            own_replies_tuple=tuple(result["reply_texts"]),
-            text_color=text_color,
-            text_bg_color=text_bg_color,
-            max_font_size=font_size,
-            font_key=story_font_choice,
-        )
+        for story_page in story_pages:
+            page_layers.append(
+                _cached_story_text_layer(
+                    page_text=story_page["text"],
+                    text_color=text_color,
+                    text_bg_color=text_bg_color,
+                    max_font_size=font_size,
+                    font_key=story_font_choice,
+                )
+            )
     except StoryImageError as e:
+        page_layers = []
         st.error(e.friendly_message)
         with st.expander("デバッグ情報（エラー詳細）"):
             st.write(e.detail or "詳細情報はありません。")
 
-    # 投稿・ダウンロードの対象（画像ならPNG、動画なら書き出し済みのMP4）。
-    post_media_bytes = None
+    # 投稿・保存の対象（画像ならPNG、動画なら書き出し済みのMP4）をページ順に並べたもの。
+    post_media_list = []
     post_media_label = "動画" if bg_is_video else "画像"
 
-    if text_layer_png:
+    if page_layers:
+        text_layer_png, current_warning, text_layout = page_layers[story_page_index]
         if current_warning:
             st.warning(current_warning)
         st.markdown('<div class="tt-step-title">プレビュー</div>', unsafe_allow_html=True)
@@ -813,16 +832,55 @@ if result and result["mode"] == MODE_INSTAGRAM:
             if background_image is not None
             else (None, None)
         )
-        bg_offset = story_preview(
+        bg_offset, story_action = story_preview(
             text_layer_url=to_data_url(text_layer_png, "image/png"),
+            layout=text_layout,
             bg_url=preview_bg_url,
             fill_url=preview_fill_url,
             bg_size=background_image.size if background_image is not None else None,
             fit=bg_fit,
             shade=overlay_percent / 100,
             token=f"{bg_cache_key}:{bg_fit}",
+            page_id=story_pages[story_page_index]["id"],
+            page_index=story_page_index,
+            page_count=story_page_count,
+            can_undo=bool(story_edit["history"]),
             key=f"story_preview_{reset_id}",
         )
+
+        # プレビューのボタン（改行・改ページ・元に戻す・ページ送り）の操作を反映する。
+        # コンポーネントの値は再実行をまたいで残るため、nonceで「まだ処理して
+        # いない操作」だけを1回適用し、すぐ再実行して新しい状態で描き直す。
+        if story_action and story_action.get("nonce") != story_edit["last_nonce"]:
+            story_edit["last_nonce"] = story_action.get("nonce")
+            action_type = story_action.get("type")
+            snapshot = (story_pages, story_page_index)
+            if action_type in (ACTION_NEWLINE, ACTION_PAGEBREAK):
+                applied = apply_text_action(
+                    story_pages, story_page_index, action_type, story_action.get("index")
+                )
+                if applied:
+                    story_edit["history"] = (story_edit["history"] + [snapshot])[
+                        -STORY_HISTORY_LIMIT:
+                    ]
+                    story_edit["pages"], story_edit["index"] = applied
+            elif action_type == "undo" and story_edit["history"]:
+                story_edit["pages"], story_edit["index"] = story_edit["history"].pop()
+            elif action_type == "reset" and story_edit["history"]:
+                story_edit["history"] = (story_edit["history"] + [snapshot])[-STORY_HISTORY_LIMIT:]
+                story_edit["pages"] = initial_pages(
+                    result["original_text"], result["reply_texts"]
+                )
+                story_edit["index"] = 0
+            elif action_type == "prev":
+                story_edit["index"] = max(0, story_page_index - 1)
+            elif action_type == "next":
+                story_edit["index"] = min(story_page_count - 1, story_page_index + 1)
+            st.rerun()
+
+        def _page_label(number):
+            """複数ページのときだけ「N枚目」を付ける。"""
+            return f"{number}枚目" if story_page_count > 1 else None
 
         if bg_is_video:
             st.caption(
@@ -833,7 +891,7 @@ if result and result["mode"] == MODE_INSTAGRAM:
                 repr(
                     (
                         bg_cache_key,
-                        hashlib.sha256(text_layer_png).hexdigest(),
+                        [hashlib.sha256(layer_png).hexdigest() for layer_png, _, _ in page_layers],
                         bg_fit,
                         bg_offset,
                         overlay_percent,
@@ -845,21 +903,29 @@ if result and result["mode"] == MODE_INSTAGRAM:
 
             if st.button("動画を書き出す", key="story_video_export_button", use_container_width=True):
                 try:
-                    with st.spinner("動画を書き出しています（動画の長さによっては数分かかります）..."):
-                        st.session_state.story_video_export = {
-                            "signature": video_signature,
-                            "bytes": render_story_video(
-                                bg_file_bytes,
-                                text_layer_png,
-                                background_image.size,
-                                bg_fit=bg_fit,
-                                bg_offset=bg_offset,
-                                overlay_opacity=overlay_percent / 100,
-                                suffix=bg_suffix,
-                                start=video_start,
-                                duration=video_end - video_start,
-                            ),
-                        }
+                    exported = []
+                    for number, (layer_png, _, _) in enumerate(page_layers, start=1):
+                        with st.spinner(
+                            f"動画を書き出しています（{number} / {story_page_count}枚目。"
+                            "動画の長さによっては数分かかります）..."
+                        ):
+                            exported.append(
+                                render_story_video(
+                                    bg_file_bytes,
+                                    layer_png,
+                                    background_image.size,
+                                    bg_fit=bg_fit,
+                                    bg_offset=bg_offset,
+                                    overlay_opacity=overlay_percent / 100,
+                                    suffix=bg_suffix,
+                                    start=video_start,
+                                    duration=video_end - video_start,
+                                )
+                            )
+                    st.session_state.story_video_export = {
+                        "signature": video_signature,
+                        "videos": exported,
+                    }
                 except StoryImageError as e:
                     st.error(e.friendly_message)
                     with st.expander("デバッグ情報（エラー詳細）"):
@@ -867,33 +933,44 @@ if result and result["mode"] == MODE_INSTAGRAM:
 
             video_export = st.session_state.story_video_export
             if video_export and video_export["signature"] == video_signature:
-                post_media_bytes = video_export["bytes"]
-                st.video(post_media_bytes)
-                st.download_button(
-                    "MP4をダウンロード",
-                    data=post_media_bytes,
-                    file_name="threads_story.mp4",
-                    mime="video/mp4",
-                    use_container_width=True,
-                )
+                post_media_list = video_export["videos"]
+                for number, video_bytes in enumerate(post_media_list, start=1):
+                    if _page_label(number):
+                        st.caption(_page_label(number))
+                    st.video(video_bytes)
+                    st.download_button(
+                        "MP4をダウンロード"
+                        + (f"（{_page_label(number)}）" if _page_label(number) else ""),
+                        data=video_bytes,
+                        file_name=(
+                            f"threads_story_{number}.mp4"
+                            if story_page_count > 1
+                            else "threads_story.mp4"
+                        ),
+                        mime="video/mp4",
+                        use_container_width=True,
+                        key=f"story_video_download_{number}",
+                    )
             elif video_export:
                 st.info("設定が変更されました。もう一度「動画を書き出す」を押してください。")
         else:
             try:
-                post_media_bytes, _ = _cached_story_image(
-                    original_text=result["original_text"],
-                    own_replies_tuple=tuple(result["reply_texts"]),
-                    bg_cache_key=bg_cache_key,
-                    text_color=text_color,
-                    text_bg_color=text_bg_color,
-                    max_font_size=font_size,
-                    overlay_opacity=overlay_percent / 100,
-                    font_key=story_font_choice,
-                    bg_fit=bg_fit,
-                    bg_offset=bg_offset,
-                    _background_image=background_image,
-                )
+                for story_page in story_pages:
+                    page_png, _ = _cached_story_image(
+                        page_text=story_page["text"],
+                        bg_cache_key=bg_cache_key,
+                        text_color=text_color,
+                        text_bg_color=text_bg_color,
+                        max_font_size=font_size,
+                        overlay_opacity=overlay_percent / 100,
+                        font_key=story_font_choice,
+                        bg_fit=bg_fit,
+                        bg_offset=bg_offset,
+                        _background_image=background_image,
+                    )
+                    post_media_list.append(page_png)
             except StoryImageError as e:
+                post_media_list = []
                 st.error(e.friendly_message)
                 with st.expander("デバッグ情報（エラー詳細）"):
                     st.write(e.detail or "詳細情報はありません。")
@@ -906,13 +983,22 @@ if result and result["mode"] == MODE_INSTAGRAM:
                     '<div class="tt-step-title">完成画像</div>', unsafe_allow_html=True
                 )
                 st.caption(SAVE_IMAGE_HINT)
-                _show_saveable_image(post_media_bytes, key="story")
+                for number, page_png in enumerate(post_media_list, start=1):
+                    _show_saveable_image(
+                        page_png, key=f"story_{number}", caption=_page_label(number)
+                    )
 
-    if post_media_bytes:
+    if post_media_list:
         # Instagramへの投稿にも、常にこの（現在の設定から書き出した）
-        # post_media_bytesを使う。古い設定の画像・動画を誤って
+        # post_media_listを使う。古い設定の画像・動画を誤って
         # 投稿してしまうことがないようにするため。
-        current_image_hash = hashlib.sha256(post_media_bytes).hexdigest()
+        post_media_count = len(post_media_list)
+        post_media_unit = (
+            f"{post_media_label}{post_media_count}枚" if post_media_count > 1 else post_media_label
+        )
+        current_image_hash = hashlib.sha256(
+            "".join(hashlib.sha256(media).hexdigest() for media in post_media_list).encode()
+        ).hexdigest()
         already_posted = st.session_state.last_posted_image_hash == current_image_hash
 
         if st.session_state.ig_post_success_message:
@@ -961,12 +1047,13 @@ if result and result["mode"] == MODE_INSTAGRAM:
             else:
                 if already_posted:
                     st.warning(
-                        f"この{post_media_label}は既にInstagramへ投稿済みです。"
+                        f"この{post_media_unit}は既にInstagramへ投稿済みです。"
                         f"同じ{post_media_label}を再投稿する場合のみ「投稿する」を押してください。"
                     )
                 st.warning(
-                    f"この{post_media_label}を「{result['account_label']}」の"
+                    f"この{post_media_unit}を「{result['account_label']}」の"
                     "Instagramストーリーズへ投稿しますか？"
+                    + ("（1枚目から順に投稿します）" if post_media_count > 1 else "")
                 )
                 confirm_col, cancel_col = st.columns(2)
                 with confirm_col:
@@ -989,37 +1076,45 @@ if result and result["mode"] == MODE_INSTAGRAM:
                         "instagram_trace": [],
                     }
                     ig_trace = debug_info["instagram_trace"]
+                    posted_count = 0  # 投稿まで完了した枚数（途中で失敗したときの案内用）
                     try:
-                        with st.spinner("Instagramへ投稿しています..."):
-                            if bg_is_video:
-                                media_url, public_id = upload_story_video(post_media_bytes)
-                            else:
-                                jpeg_bytes = convert_png_to_jpeg(post_media_bytes)
-                                media_url, public_id = upload_story_image(jpeg_bytes)
-                            debug_info["cloudinary_url"] = media_url
+                        for number, media_bytes in enumerate(post_media_list, start=1):
+                            with st.spinner(
+                                "Instagramへ投稿しています"
+                                + (f"（{number} / {post_media_count}枚目）" if post_media_count > 1 else "")
+                                + "..."
+                            ):
+                                if bg_is_video:
+                                    media_url, public_id = upload_story_video(media_bytes)
+                                else:
+                                    jpeg_bytes = convert_png_to_jpeg(media_bytes)
+                                    media_url, public_id = upload_story_image(jpeg_bytes)
+                                debug_info["cloudinary_url"] = media_url
 
-                            # Instagramに渡す前に、公開URLが実際に取得できる
-                            # 正常なファイルになっているかを確認する（CDN反映待ちを考慮）。
-                            verify_result = (
-                                verify_video_url(media_url)
-                                if bg_is_video
-                                else verify_image_url(media_url)
-                            )
-                            debug_info["verify_result"] = verify_result
+                                # Instagramに渡す前に、公開URLが実際に取得できる
+                                # 正常なファイルになっているかを確認する（CDN反映待ちを考慮）。
+                                verify_result = (
+                                    verify_video_url(media_url)
+                                    if bg_is_video
+                                    else verify_image_url(media_url)
+                                )
+                                debug_info["verify_result"] = verify_result
 
-                            post_story(
-                                ig_credentials["ig_user_id"],
-                                ig_credentials["access_token"],
-                                media_url,
-                                trace=ig_trace,
-                                is_video=bg_is_video,
-                            )
-                    except CloudinaryError as e:
-                        st.session_state.ig_post_error = {
-                            "message": e.friendly_message,
-                            "detail": e.detail,
-                        }
-                    except InstagramAPIError as e:
+                                post_story(
+                                    ig_credentials["ig_user_id"],
+                                    ig_credentials["access_token"],
+                                    media_url,
+                                    trace=ig_trace,
+                                    is_video=bg_is_video,
+                                )
+                                # Instagram側でのメディアコンテナ作成・公開が成功した後にのみ、
+                                # Cloudinaryの一時ファイルを削除する。削除に失敗しても
+                                # 投稿自体は成功として扱う。
+                                delete_story_image(
+                                    public_id, resource_type="video" if bg_is_video else "image"
+                                )
+                                posted_count += 1
+                    except (CloudinaryError, InstagramAPIError) as e:
                         st.session_state.ig_post_error = {
                             "message": e.friendly_message,
                             "detail": e.detail,
@@ -1030,17 +1125,20 @@ if result and result["mode"] == MODE_INSTAGRAM:
                             "detail": str(e),
                         }
                     else:
-                        # Instagram側でのメディアコンテナ作成・公開がすべて成功した後にのみ、
-                        # Cloudinaryの一時ファイルを削除する。削除に失敗しても投稿自体は成功として扱う。
-                        delete_story_image(
-                            public_id, resource_type="video" if bg_is_video else "image"
-                        )
                         st.session_state.last_posted_image_hash = current_image_hash
                         st.session_state.ig_post_success_message = (
                             "Instagramストーリーズへの投稿が完了しました。"
+                            + (f"（{post_media_count}枚）" if post_media_count > 1 else "")
                         )
                     finally:
                         st.session_state.ig_post_debug_info = debug_info
+                        if st.session_state.ig_post_error and post_media_count > 1:
+                            # 複数枚の途中で失敗した場合、どこまで投稿されたかを伝える
+                            # （そのまま「投稿する」をやり直すと、投稿済みのぶんが重複するため）。
+                            st.session_state.ig_post_error["message"] += (
+                                f"（{post_media_count}枚中{posted_count}枚は投稿済みです。"
+                                "もう一度投稿すると、投稿済みのぶんも重ねて投稿されます）"
+                            )
 
                     # 確認ダイアログを画面から消し、結果メッセージだけを
                     # きれいに表示し直すために再実行する。

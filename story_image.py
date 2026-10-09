@@ -321,7 +321,7 @@ def _draw_text_backgrounds(draw, text_items, bg_rgb):
         )
 
 
-def render_story_text_layer(
+def render_story_text_layer_with_layout(
     original_text,
     own_replies,
     text_color=STORY_DEFAULT_TEXT_COLOR,
@@ -337,7 +337,13 @@ def render_story_text_layer(
     文字量が多い場合、max_font_sizeを上限としてフォントサイズを自動的に縮小し、
     全文が画像内に収まるようにする（max_font_sizeより大きくすることはない）。
 
-    戻り値: (RGBA画像, 警告メッセージ または None)
+    戻り値: (RGBA画像, 警告メッセージ または None, 行ごとの配置情報)
+
+    行ごとの配置情報は、プレビュー上で文字の間にカーソルを置くために使う。
+    描画した1行ごとに {"s": その行の先頭が元の文章の何文字目か,
+    "x": 各文字の境目のx座標（文字数+1個）, "y": 行の上端, "h": 文字の高さ}
+    を上から順に並べたリスト（座標はキャンバスのpx）。文字数の数え方は、
+    original_textとown_repliesを空行1つでつないだ文字列が基準。
     """
     layer = Image.new("RGBA", (CANVAS_WIDTH, CANVAS_HEIGHT), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
@@ -422,6 +428,39 @@ def render_story_text_layer(
     for item_x, item_y, line, item_font in text_items:
         draw.text((item_x, item_y), line, font=item_font, fill=text_rgb)
 
+    # --- カーソル用の配置情報 ---
+    # text_itemsは「ブロック → 段落（改行で区切った1行）→ 折り返し後の行」の順に
+    # 並んでいるので、同じ順にたどって各行の先頭の文字位置を数える。
+    # 折り返しは文字を一切捨てないため、折り返し後の行をつなげると元の段落に戻る。
+    ascent, descent = body_font.getmetrics()
+    line_starts = []
+    offset = 0
+    for block in blocks:
+        for paragraph in block.split("\n"):
+            for wrapped in _wrap_paragraph(draw, paragraph, body_font, max_width):
+                line_starts.append(offset)
+                offset += len(wrapped)
+            offset += 1  # 段落末の改行
+        offset += 1  # ブロック間の空行
+    layout = [
+        {
+            "s": start,
+            "x": [
+                round(item_x + draw.textlength(line[:i], font=body_font), 1)
+                for i in range(len(line) + 1)
+            ],
+            "y": item_y,
+            "h": ascent + descent,
+        }
+        for start, (item_x, item_y, line, _) in zip(line_starts, text_items)
+    ]
+
+    return layer, warning, layout
+
+
+def render_story_text_layer(*args, **kwargs):
+    """render_story_text_layer_with_layout()の、配置情報を返さない版。"""
+    layer, warning, _ = render_story_text_layer_with_layout(*args, **kwargs)
     return layer, warning
 
 
