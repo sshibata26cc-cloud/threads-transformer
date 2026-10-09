@@ -38,7 +38,12 @@ from story_image import (
     load_background_image,
     render_story_text_layer,
 )
-from story_preview import background_preview_data_url, story_preview, to_data_url
+from story_preview import (
+    background_preview_data_url,
+    inject_mobile_media_picker_fix,
+    story_preview,
+    to_data_url,
+)
 from story_video import (
     MAX_VIDEO_SECONDS,
     VIDEO_EXTENSIONS,
@@ -580,6 +585,7 @@ if result and result["mode"] == MODE_INSTAGRAM:
             type=["png", "jpg", "jpeg", "webp", *VIDEO_EXTENSIONS],
             key=f"story_bg_{reset_id}",
         )
+        inject_mobile_media_picker_fix()
         bg_fit_label = st.radio(
             "背景のサイズ",
             list(BG_FIT_CHOICES),

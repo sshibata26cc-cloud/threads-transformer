@@ -29,6 +29,8 @@ CANVAS_WIDTH = 1080
 CANVAS_HEIGHT = 1920
 
 BACKGROUND_COLOR = (250, 250, 248)  # 背景画像が指定されていない場合の白背景
+# 背景（画像・動画）を差し込んだときに、背景が届かない余白の色（#1E1E1E）。
+LETTERBOX_COLOR = (30, 30, 30)
 
 MARGIN_X = 72
 MARGIN_TOP = 90
@@ -430,7 +432,11 @@ def generate_story_image(
 
     戻り値: (PNGのバイト列, 警告メッセージ または None)
     """
-    canvas = Image.new("RGB", (CANVAS_WIDTH, CANVAS_HEIGHT), BACKGROUND_COLOR)
+    canvas = Image.new(
+        "RGB",
+        (CANVAS_WIDTH, CANVAS_HEIGHT),
+        BACKGROUND_COLOR if background_image is None else LETTERBOX_COLOR,
+    )
 
     if background_image is not None:
         _paste_background(canvas, background_image, bg_fit, bg_offset, overlay_opacity)

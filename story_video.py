@@ -23,10 +23,10 @@ import tempfile
 from PIL import Image
 
 from story_image import (
-    BACKGROUND_COLOR,
     CANVAS_HEIGHT,
     CANVAS_WIDTH,
     DEFAULT_BG_FIT,
+    LETTERBOX_COLOR,
     MAX_OVERLAY_OPACITY,
     StoryImageError,
     compute_background_placement,
@@ -146,7 +146,7 @@ def render_story_video(
 
     opacity = max(0.0, min(overlay_opacity or 0.0, MAX_OVERLAY_OPACITY))
     brightness = f"{1 - opacity:.3f}"
-    canvas_color = "0x%02X%02X%02X" % BACKGROUND_COLOR
+    canvas_color = "0x%02X%02X%02X" % LETTERBOX_COLOR
 
     filter_graph = (
         f"color=c={canvas_color}:s={CANVAS_WIDTH}x{CANVAS_HEIGHT}:r={OUTPUT_FPS}[canvas];"
