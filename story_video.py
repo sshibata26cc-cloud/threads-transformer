@@ -23,10 +23,11 @@ import tempfile
 from PIL import Image
 
 from story_image import (
+    BG_FILL_BLUR,
+    BG_FILL_DOWNSCALE,
     CANVAS_HEIGHT,
     CANVAS_WIDTH,
     DEFAULT_BG_FIT,
-    LETTERBOX_COLOR,
     MAX_OVERLAY_OPACITY,
     StoryImageError,
     compute_background_placement,
@@ -152,13 +153,20 @@ def render_story_video(
 
     opacity = max(0.0, min(overlay_opacity or 0.0, MAX_OVERLAY_OPACITY))
     brightness = f"{1 - opacity:.3f}"
-    canvas_color = "0x%02X%02X%02X" % LETTERBOX_COLOR
+    fill_w = CANVAS_WIDTH // BG_FILL_DOWNSCALE
+    fill_h = CANVAS_HEIGHT // BG_FILL_DOWNSCALE
 
+    # 余白は、同じ動画を全面を覆う大きさにして強くぼかしたもので埋める
+    # （story_image.make_background_fill()と同じ作り方）。その上に本体を重ね、
+    # 全体を暗くしてから文字レイヤーを載せる。
     filter_graph = (
-        f"color=c={canvas_color}:s={CANVAS_WIDTH}x{CANVAS_HEIGHT}:r={OUTPUT_FPS}[canvas];"
-        f"[0:v]scale={new_w}:{new_h}:flags=lanczos,setsar=1,"
-        f"colorchannelmixer=rr={brightness}:gg={brightness}:bb={brightness}[bg];"
-        f"[canvas][bg]overlay={left}:{top}:shortest=1[base];"
+        f"[0:v]split[main][fillsrc];"
+        f"[fillsrc]scale={fill_w}:{fill_h}:force_original_aspect_ratio=increase,"
+        f"crop={fill_w}:{fill_h},gblur=sigma={BG_FILL_BLUR},"
+        f"scale={CANVAS_WIDTH}:{CANVAS_HEIGHT}:flags=bicubic,setsar=1[fill];"
+        f"[main]scale={new_w}:{new_h}:flags=lanczos,setsar=1[bg];"
+        f"[fill][bg]overlay={left}:{top},"
+        f"colorchannelmixer=rr={brightness}:gg={brightness}:bb={brightness}[base];"
         f"[base][1:v]overlay=0:0:format=auto,format=yuv420p[out]"
     )
 

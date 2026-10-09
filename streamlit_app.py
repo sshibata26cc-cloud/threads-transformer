@@ -41,6 +41,7 @@ from story_image import (
     render_story_text_layer,
 )
 from story_preview import (
+    background_fill_data_url,
     background_preview_data_url,
     inject_mobile_media_picker_fix,
     story_preview,
@@ -155,8 +156,14 @@ def _format_seconds(seconds) -> str:
 
 @st.cache_data(show_spinner=False, max_entries=5)
 def _cached_preview_background(bg_cache_key, _background_image):
-    """プレビュー表示用に縮小した背景（data URL）をキャッシュする。"""
-    return background_preview_data_url(_background_image)
+    """
+    プレビュー表示用の背景をキャッシュする。
+    戻り値: (縮小した背景のdata URL, 余白を埋めるぼかし背景のdata URL)
+    """
+    return (
+        background_preview_data_url(_background_image),
+        background_fill_data_url(_background_image),
+    )
 
 
 @st.cache_data(show_spinner=False, max_entries=20)
@@ -773,13 +780,15 @@ if result and result["mode"] == MODE_INSTAGRAM:
         if current_warning:
             st.warning(current_warning)
         st.markdown('<div class="tt-step-title">プレビュー</div>', unsafe_allow_html=True)
+        preview_bg_url, preview_fill_url = (
+            _cached_preview_background(preview_bg_key, background_image)
+            if background_image is not None
+            else (None, None)
+        )
         bg_offset = story_preview(
             text_layer_url=to_data_url(text_layer_png, "image/png"),
-            bg_url=(
-                _cached_preview_background(preview_bg_key, background_image)
-                if background_image is not None
-                else None
-            ),
+            bg_url=preview_bg_url,
+            fill_url=preview_fill_url,
             bg_size=background_image.size if background_image is not None else None,
             fit=bg_fit,
             shade=overlay_percent / 100,

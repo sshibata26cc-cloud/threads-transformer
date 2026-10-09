@@ -16,9 +16,10 @@
   }
   #stage.movable { cursor: grab; touch-action: none; }
   #stage.dragging { cursor: grabbing; }
+  #fill { position: absolute; inset: 0; width: 100%; height: 100%; display: none; pointer-events: none; -webkit-user-drag: none; }
   #bg { position: absolute; display: none; }
   #bg img { display: block; width: 100%; height: 100%; pointer-events: none; -webkit-user-drag: none; }
-  #shade { position: absolute; inset: 0; background: #000; opacity: 0; pointer-events: none; }
+  #shade { position: absolute; inset: 0; background: #000; opacity: 0; display: none; pointer-events: none; }
   #text { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; -webkit-user-drag: none; }
   #footer {
     display: none; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap;
@@ -32,7 +33,9 @@
 </head>
 <body>
 <div id="stage">
-  <div id="bg"><img id="bgimg" alt=""><div id="shade"></div></div>
+  <img id="fill" alt="">
+  <div id="bg"><img id="bgimg" alt=""></div>
+  <div id="shade"></div>
   <img id="text" alt="">
 </div>
 <div id="footer">
@@ -45,6 +48,7 @@
   var bg = document.getElementById("bg");
   var bgimg = document.getElementById("bgimg");
   var shade = document.getElementById("shade");
+  var fill = document.getElementById("fill");
   var text = document.getElementById("text");
   var footer = document.getElementById("footer");
 
@@ -84,10 +88,14 @@
       bg.style.height = p.h * f + "px";
       bg.style.left = p.left * f + "px";
       bg.style.top = p.top * f + "px";
+      shade.style.display = "block";
       shade.style.opacity = args.shade;
+      fill.style.display = args.fill ? "block" : "none";
       movable = p.maxX >= 1 || p.maxY >= 1;
     } else {
       bg.style.display = "none";
+      shade.style.display = "none";
+      fill.style.display = "none";
     }
     stage.classList.toggle("movable", movable);
     footer.style.display = movable ? "flex" : "none";
@@ -139,6 +147,7 @@
       offset = { x: 0, y: 0 };
     }
     if (args.bg && bgimg.getAttribute("src") !== args.bg) bgimg.src = args.bg;
+    if (args.fill && fill.getAttribute("src") !== args.fill) fill.src = args.fill;
     if (text.getAttribute("src") !== args.text) text.src = args.text;
     layout();
   });

@@ -21,7 +21,7 @@ app_fonts.py と fonts/FONTS_NOTICE.txt を参照。
 import io
 import re
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 from app_fonts import DEFAULT_FONT_KEY, get_font
 
@@ -29,9 +29,13 @@ CANVAS_WIDTH = 1080
 CANVAS_HEIGHT = 1920
 
 BACKGROUND_COLOR = (250, 250, 248)  # カルーセルで背景画像が指定されていない場合の白背景
-# ストーリーズの地の色（#1E1E1E）。背景を指定しない場合の全面と、
-# 背景（画像・動画）を差し込んだときに背景が届かない余白に使う。
+# ストーリーズの地の色（#1E1E1E）。背景を指定しない場合に全面へ使う。
+# 背景（画像・動画）を差し込んだときの余白は、この色ではなく
+# make_background_fill()のぼかし背景で埋める。
 LETTERBOX_COLOR = (30, 30, 30)
+# 余白を埋めるぼかし背景の作り方（キャンバスの1/20に縮小してからぼかす）。
+BG_FILL_DOWNSCALE = 20
+BG_FILL_BLUR = 10  # 縮小後の画像に対するぼかしの強さ（px）
 
 MARGIN_X = 72
 MARGIN_TOP = 90
@@ -184,19 +188,42 @@ def compute_background_placement(
     return new_w, new_h, left, top
 
 
+def make_background_fill(image, canvas_w=CANVAS_WIDTH, canvas_h=CANVAS_HEIGHT):
+    """
+    背景が届かない余白を埋めるための「ぼかし背景」を作る。
+
+    背景をキャンバス全面を覆う大きさ（縦長のキャンバスに横長の画像なら
+    「縦いっぱい」と同じ大きさ）にして中央で切り抜き、強くぼかす。
+    元の画像の色合いがそのまま上下（左右）の余白へグラデーションのように
+    広がって見える。
+
+    戻り値はキャンバスの 1/BG_FILL_DOWNSCALE の小さな画像で、使う側で
+    キャンバスサイズへ引き伸ばす（強いぼかしなので細部は不要で、小さい方が
+    速い）。プレビュー（ブラウザ）・動画書き出し（ffmpeg）も同じ縮小率・
+    同じぼかしの強さで作っているので、変更する場合は揃えること。
+    """
+    small = _cover_resize(
+        image.convert("RGB"), canvas_w // BG_FILL_DOWNSCALE, canvas_h // BG_FILL_DOWNSCALE
+    )
+    return small.filter(ImageFilter.GaussianBlur(BG_FILL_BLUR))
+
+
 def _paste_background(canvas, image, fit_mode, offset, overlay_opacity):
-    """背景画像を指定の差し込み方・位置でcanvasへ貼る。暗さは背景の上にだけ重ねる。"""
+    """
+    背景画像を指定の差し込み方・位置で貼ったキャンバスを返す。
+    余白はぼかし背景で埋め、暗さはキャンバス全体に重ねる。
+    """
     offset_x, offset_y = offset or (0, 0)
     new_w, new_h, left, top = compute_background_placement(
         image.width, image.height, fit_mode, offset_x, offset_y, canvas.width, canvas.height
     )
-    placed = image.convert("RGB").resize((new_w, new_h), Image.LANCZOS)
+    canvas.paste(make_background_fill(image, canvas.width, canvas.height).resize(canvas.size, Image.BICUBIC))
+    canvas.paste(image.convert("RGB").resize((new_w, new_h), Image.LANCZOS), (left, top))
 
     opacity = max(0.0, min(overlay_opacity or 0.0, MAX_OVERLAY_OPACITY))
     if opacity > 0:
-        placed = Image.blend(placed, Image.new("RGB", placed.size, (0, 0, 0)), opacity)
-
-    canvas.paste(placed, (left, top))
+        canvas = Image.blend(canvas, Image.new("RGB", canvas.size, (0, 0, 0)), opacity)
+    return canvas
 
 
 def _split_tokens(paragraph: str):
@@ -426,7 +453,7 @@ def generate_story_image(
         text_bg_color: 文字の背景色（"#RRGGBB"形式）。
                        None（既定値）の場合は文字背景を描画しない。
         max_font_size: ユーザーが希望する本文フォントサイズの上限。
-        overlay_opacity: 背景画像の上に重ねる黒の不透明度（0.0〜0.8）。
+        overlay_opacity: 背景（余白のぼかし背景を含む）に重ねる黒の不透明度（0.0〜0.8）。
                          background_imageがNoneの場合は無視される。
         font_key: app_fonts.FONT_OPTIONSのいずれか。
         bg_fit: BG_FIT_WIDTH（横いっぱい）または BG_FIT_HEIGHT（縦いっぱい）。
@@ -441,7 +468,7 @@ def generate_story_image(
     )
 
     if background_image is not None:
-        _paste_background(canvas, background_image, bg_fit, bg_offset, overlay_opacity)
+        canvas = _paste_background(canvas, background_image, bg_fit, bg_offset, overlay_opacity)
 
     text_layer, warning = render_story_text_layer(
         original_text,

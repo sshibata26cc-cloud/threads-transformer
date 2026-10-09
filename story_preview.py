@@ -15,7 +15,7 @@ import os
 import streamlit.components.v1 as components
 from PIL import Image
 
-from story_image import CANVAS_HEIGHT, CANVAS_WIDTH, LETTERBOX_COLOR
+from story_image import CANVAS_HEIGHT, CANVAS_WIDTH, LETTERBOX_COLOR, make_background_fill
 
 _component = components.declare_component(
     "story_preview",
@@ -39,7 +39,14 @@ def background_preview_data_url(image: Image.Image) -> str:
     return to_data_url(buffer.getvalue(), "image/jpeg")
 
 
-def story_preview(text_layer_url, bg_url, bg_size, fit, shade, token, key):
+def background_fill_data_url(image: Image.Image) -> str:
+    """余白を埋めるぼかし背景（小さなJPEGのdata URL）を作る。ブラウザ側で引き伸ばして使う。"""
+    buffer = io.BytesIO()
+    make_background_fill(image).save(buffer, format="JPEG", quality=90)
+    return to_data_url(buffer.getvalue(), "image/jpeg")
+
+
+def story_preview(text_layer_url, bg_url, bg_size, fit, shade, token, key, fill_url=None):
     """
     プレビューを表示し、現在の背景のずれ (x, y)（キャンバスのpx）を返す。
 
@@ -47,6 +54,7 @@ def story_preview(text_layer_url, bg_url, bg_size, fit, shade, token, key):
         text_layer_url: 文字レイヤー（透明PNG）のdata URL。
         bg_url: 背景のdata URL。背景なしの場合はNone。
         bg_size: 背景の元の (幅, 高さ)。背景なしの場合はNone。
+        fill_url: 余白を埋めるぼかし背景のdata URL。背景なしの場合はNone。
         fit: story_image.BG_FIT_WIDTH / BG_FIT_HEIGHT。
         shade: 背景の暗さ（0.0〜0.8）。
         token: 背景と差し込み方を表す識別子。変わると位置は中央へ戻る。
@@ -55,6 +63,7 @@ def story_preview(text_layer_url, bg_url, bg_size, fit, shade, token, key):
     value = _component(
         text=text_layer_url,
         bg=bg_url,
+        fill=fill_url,
         bg_w=bg_w,
         bg_h=bg_h,
         fit=fit,
