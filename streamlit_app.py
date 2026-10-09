@@ -119,13 +119,20 @@ def _cached_load_background_image(file_bytes):
     return load_background_image(file_bytes)
 
 
-@st.cache_data(show_spinner=False, max_entries=3)
-def _cached_video_poster(bg_cache_key, _video_bytes, suffix):
+@st.cache_data(show_spinner=False, max_entries=20)
+def _cached_video_poster(bg_cache_key, _video_bytes, suffix, start=0):
     """
     背景動画から位置合わせ用の静止画と動画の長さを取り出す処理をキャッシュする。
     動画本体は大きいのでハッシュ対象にせず、bg_cache_keyで区別する。
+    startは使用する区間の開始位置（秒）。
     """
-    return load_video_poster(_video_bytes, suffix=suffix)
+    return load_video_poster(_video_bytes, suffix=suffix, start=start)
+
+
+def _format_seconds(seconds) -> str:
+    """秒数を「分:秒」（例: 1:05）の表記にする。"""
+    seconds = int(seconds)
+    return f"{seconds // 60}:{seconds % 60:02d}"
 
 
 @st.cache_data(show_spinner=False, max_entries=5)
@@ -650,6 +657,8 @@ if result and result["mode"] == MODE_INSTAGRAM:
     bg_cache_key = None
     bg_file_bytes = bg_file.getvalue() if bg_file is not None else None
     bg_suffix = ""
+    video_start = 0  # 動画のうち使用する区間の開始位置（秒）
+    preview_bg_key = None
     if bg_file_bytes is not None:
         bg_is_video = is_video_filename(bg_file.name)
         bg_suffix = "." + bg_file.name.rsplit(".", 1)[-1].lower()
@@ -661,13 +670,47 @@ if result and result["mode"] == MODE_INSTAGRAM:
                 background_image, video_duration = _cached_video_poster(
                     bg_cache_key, bg_file_bytes, bg_suffix
                 )
-                if video_duration and video_duration > MAX_VIDEO_SECONDS:
-                    st.warning(
-                        f"ストーリーズの動画は最長{MAX_VIDEO_SECONDS}秒のため、"
-                        f"先頭の{MAX_VIDEO_SECONDS}秒だけを使用します。"
+                # 60秒を超える動画は、使用する区間をここで選んでもらう。
+                # 選んだ開始位置のコマをプレビューに表示し、書き出しも
+                # その位置から行う。
+                max_start = int((video_duration or 0) - MAX_VIDEO_SECONDS)
+                if max_start >= 1:
+                    st.markdown(
+                        '<div class="tt-step-title">動画の使用区間</div>',
+                        unsafe_allow_html=True,
                     )
+                    with st.container(border=True):
+                        st.write(
+                            f"この動画は{_format_seconds(video_duration)}あります。"
+                            f"ストーリーズの動画は最長{MAX_VIDEO_SECONDS}秒のため、"
+                            "使用する区間の開始位置を選んでください。"
+                        )
+                        video_start = st.select_slider(
+                            "開始位置",
+                            options=list(range(max_start + 1)),
+                            value=0,
+                            format_func=_format_seconds,
+                            key=f"story_video_start_{reset_id}_{bg_file.file_id}",
+                        )
+                        st.caption(
+                            f"使用する区間: {_format_seconds(video_start)} 〜 "
+                            f"{_format_seconds(video_start + MAX_VIDEO_SECONDS)}"
+                            f"（{MAX_VIDEO_SECONDS}秒間）"
+                        )
+                        with st.expander("選んだ区間を再生して確認する"):
+                            st.video(
+                                bg_file_bytes,
+                                start_time=video_start,
+                                end_time=video_start + MAX_VIDEO_SECONDS,
+                            )
+                    if video_start:
+                        background_image, _ = _cached_video_poster(
+                            bg_cache_key, bg_file_bytes, bg_suffix, start=video_start
+                        )
+                preview_bg_key = f"{bg_cache_key}@{video_start}"
             else:
                 bg_cache_key = _background_cache_key(bg_file_bytes)
+                preview_bg_key = bg_cache_key
                 background_image = _cached_load_background_image(bg_file_bytes)
         except StoryImageError as e:
             bg_is_video = False
@@ -707,7 +750,7 @@ if result and result["mode"] == MODE_INSTAGRAM:
         bg_offset = story_preview(
             text_layer_url=to_data_url(text_layer_png, "image/png"),
             bg_url=(
-                _cached_preview_background(bg_cache_key, background_image)
+                _cached_preview_background(preview_bg_key, background_image)
                 if background_image is not None
                 else None
             ),
@@ -731,6 +774,7 @@ if result and result["mode"] == MODE_INSTAGRAM:
                         bg_fit,
                         bg_offset,
                         overlay_percent,
+                        video_start,
                     )
                 ).encode()
             ).hexdigest()
@@ -748,6 +792,7 @@ if result and result["mode"] == MODE_INSTAGRAM:
                                 bg_offset=bg_offset,
                                 overlay_opacity=overlay_percent / 100,
                                 suffix=bg_suffix,
+                                start=video_start,
                             ),
                         }
                 except StoryImageError as e:

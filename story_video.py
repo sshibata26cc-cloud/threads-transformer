@@ -74,10 +74,11 @@ def _stderr_tail(completed, lines=15) -> str:
     return "\n".join(text.strip().splitlines()[-lines:])
 
 
-def load_video_poster(video_bytes: bytes, suffix: str = ".mp4"):
+def load_video_poster(video_bytes: bytes, suffix: str = ".mp4", start: float = 0.0):
     """
     動画から静止画を1枚取り出す。プレビューでの位置合わせと、
-    配置計算（動画の縦横サイズ）に使う。
+    配置計算（動画の縦横サイズ）に使う。startは使用する区間の開始位置（秒）で、
+    その少し先のコマを取り出す。
 
     戻り値: (RGB画像, 動画の長さ[秒] または None)
     読み込めない場合はStoryImageErrorを送出する。
@@ -89,7 +90,7 @@ def load_video_poster(video_bytes: bytes, suffix: str = ".mp4"):
 
         # 冒頭は真っ暗なことがあるので少し進んだ位置を取り、
         # 短すぎて取れなければ先頭フレームにする。
-        for seek in ("0.5", "0"):
+        for seek in (f"{start + 0.5:.2f}", f"{start:.2f}", "0"):
             completed = _run(
                 ["-ss", seek, "-i", src, "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "-"]
             )
@@ -126,6 +127,7 @@ def render_story_video(
     bg_offset=(0, 0),
     overlay_opacity=0.0,
     suffix: str = ".mp4",
+    start: float = 0.0,
 ) -> bytes:
     """
     背景動画の上に文字レイヤーを重ねた、1080x1920のMP4を書き出して返す。
@@ -134,6 +136,8 @@ def render_story_video(
         text_layer_png: render_story_text_layer()の結果をPNGにしたもの。
         frame_size: load_video_poster()で得た静止画の (幅, 高さ)。
         bg_fit / bg_offset / overlay_opacity: generate_story_image()と同じ意味。
+        start: 元の動画のうち、使用する区間の開始位置（秒）。
+               そこから最長MAX_VIDEO_SECONDS秒ぶんを書き出す。
     """
     src_w, src_h = frame_size
     offset_x, offset_y = bg_offset or (0, 0)
@@ -168,6 +172,7 @@ def render_story_video(
         completed = _run(
             [
                 "-y",
+                "-ss", f"{max(0.0, start):.2f}",
                 "-i", src,
                 "-i", overlay,
                 "-filter_complex", filter_graph,
