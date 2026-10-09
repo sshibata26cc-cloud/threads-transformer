@@ -32,7 +32,6 @@ FONT_FILES = {
     "游明朝体": "BIZUDPMincho-Regular.ttf",  # BIZ UDPMincho（明朝/Serif系の代替）
     "ゴシック": "ipaexg.ttf",  # IPAexゴシック（既存フォント。表示名のみ変更）
     "Arial": "Arimo-Regular.ttf",  # Arimo（Arial互換のSans。日本語グリフなし）
-    "手書き風書体": "Yomogi-Regular.ttf",  # Yomogi（手書き風の代替）
     # ここから下は追加フォント（すべて日本語対応・SIL OFL）。
     "太ゴシック": "ZenKakuGothicNew-Bold.ttf",  # Zen Kaku Gothic New Bold
     "丸ゴシック": "ZenMaruGothic-Regular.ttf",  # Zen Maru Gothic
@@ -47,6 +46,7 @@ FONT_FILES = {
     "モダン明朝": "KaiseiOpti-Regular.ttf",  # Kaisei Opti
     "見出し明朝": "KaiseiTokumin-Bold.ttf",  # Kaisei Tokumin Bold
     "ペン字風": "ZenKurenaido-Regular.ttf",  # Zen Kurenaido
+    "手書き風書体": "Yomogi-Regular.ttf",  # Yomogi（手書き風の代替）
 }
 
 # 選択肢の表示順（Streamlitのselectboxにそのまま渡す）。
