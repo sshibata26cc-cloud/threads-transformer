@@ -28,8 +28,9 @@ from app_fonts import DEFAULT_FONT_KEY, get_font
 CANVAS_WIDTH = 1080
 CANVAS_HEIGHT = 1920
 
-BACKGROUND_COLOR = (250, 250, 248)  # 背景画像が指定されていない場合の白背景
-# 背景（画像・動画）を差し込んだときに、背景が届かない余白の色（#1E1E1E）。
+BACKGROUND_COLOR = (250, 250, 248)  # カルーセルで背景画像が指定されていない場合の白背景
+# ストーリーズの地の色（#1E1E1E）。背景を指定しない場合の全面と、
+# 背景（画像・動画）を差し込んだときに背景が届かない余白に使う。
 LETTERBOX_COLOR = (30, 30, 30)
 
 MARGIN_X = 72
@@ -43,7 +44,8 @@ BG_FIT_WIDTH = "width"  # 横いっぱい（背景の横幅をキャンバスの
 BG_FIT_HEIGHT = "height"  # 縦いっぱい（背景の高さをキャンバスの高さに合わせる）
 DEFAULT_BG_FIT = BG_FIT_WIDTH
 
-DEFAULT_TEXT_COLOR = "#1E1E1E"
+DEFAULT_TEXT_COLOR = "#1E1E1E"  # カルーセル（白背景）の文字色の初期値
+STORY_DEFAULT_TEXT_COLOR = "#FFFFFF"  # ストーリーズ（黒地）の文字色の初期値
 DEFAULT_TEXT_BG_COLOR = "#FFFFFF"  # 「色を設定」を選んだときのカラーピッカー初期値
 DEFAULT_MAX_FONT_SIZE = 44
 MIN_BODY_FONT_SIZE = 20
@@ -295,7 +297,7 @@ def _draw_text_backgrounds(draw, text_items, bg_rgb):
 def render_story_text_layer(
     original_text,
     own_replies,
-    text_color=DEFAULT_TEXT_COLOR,
+    text_color=STORY_DEFAULT_TEXT_COLOR,
     text_bg_color=None,
     max_font_size=DEFAULT_MAX_FONT_SIZE,
     font_key=DEFAULT_FONT_KEY,
@@ -406,7 +408,7 @@ def generate_story_image(
     original_text,
     own_replies,
     background_image=None,
-    text_color=DEFAULT_TEXT_COLOR,
+    text_color=STORY_DEFAULT_TEXT_COLOR,
     text_bg_color=None,
     max_font_size=DEFAULT_MAX_FONT_SIZE,
     overlay_opacity=0.0,
@@ -419,7 +421,7 @@ def generate_story_image(
 
     引数:
         background_image: load_background_image()で読み込み済みのRGB画像、
-                           またはNone（Noneの場合は白背景を使用）。
+                           またはNone（Noneの場合は黒地を使用）。
         text_color: 本文の文字色（"#RRGGBB"形式）。
         text_bg_color: 文字の背景色（"#RRGGBB"形式）。
                        None（既定値）の場合は文字背景を描画しない。
@@ -435,7 +437,7 @@ def generate_story_image(
     canvas = Image.new(
         "RGB",
         (CANVAS_WIDTH, CANVAS_HEIGHT),
-        BACKGROUND_COLOR if background_image is None else LETTERBOX_COLOR,
+        LETTERBOX_COLOR,
     )
 
     if background_image is not None:

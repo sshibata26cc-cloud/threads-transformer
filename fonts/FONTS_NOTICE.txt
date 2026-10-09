@@ -94,19 +94,47 @@ UI表示名: 装飾明朝
 ライセンス: SIL Open Font License, Version 1.1
             → KaiseiDecol-OFL.txt
 --------------------------------------------------------------------
-UI表示名: 極太ゴシック
-ファイル: DelaGothicOne-Regular.ttf
-フォント名: Dela Gothic One
-配布元: https://github.com/google/fonts/tree/main/ofl/delagothicone (Google Fonts)
+UI表示名: しっぽり明朝
+ファイル: ShipporiMincho-Regular.ttf
+フォント名: Shippori Mincho
+配布元: https://github.com/google/fonts/tree/main/ofl/shipporimincho (Google Fonts)
 ライセンス: SIL Open Font License, Version 1.1
-            → DelaGothicOne-OFL.txt
+            → ShipporiMincho-OFL.txt
 --------------------------------------------------------------------
-UI表示名: ポップ体
-ファイル: RocknRollOne-Regular.ttf
-フォント名: RocknRoll One
-配布元: https://github.com/google/fonts/tree/main/ofl/rocknrollone (Google Fonts)
+UI表示名: さわらび明朝
+ファイル: SawarabiMincho-Regular.ttf
+フォント名: Sawarabi Mincho
+配布元: https://github.com/google/fonts/tree/main/ofl/sawarabimincho (Google Fonts)
 ライセンス: SIL Open Font License, Version 1.1
-            → RocknRollOne-OFL.txt
+            → SawarabiMincho-OFL.txt
+--------------------------------------------------------------------
+UI表示名: ひな明朝
+ファイル: HinaMincho-Regular.ttf
+フォント名: Hina Mincho
+配布元: https://github.com/google/fonts/tree/main/ofl/hinamincho (Google Fonts)
+ライセンス: SIL Open Font License, Version 1.1
+            → HinaMincho-OFL.txt
+--------------------------------------------------------------------
+UI表示名: アンティーク明朝
+ファイル: ZenAntique-Regular.ttf
+フォント名: Zen Antique
+配布元: https://github.com/google/fonts/tree/main/ofl/zenantique (Google Fonts)
+ライセンス: SIL Open Font License, Version 1.1
+            → ZenAntique-OFL.txt
+--------------------------------------------------------------------
+UI表示名: モダン明朝
+ファイル: KaiseiOpti-Regular.ttf
+フォント名: Kaisei Opti
+配布元: https://github.com/google/fonts/tree/main/ofl/kaiseiopti (Google Fonts)
+ライセンス: SIL Open Font License, Version 1.1
+            → KaiseiOpti-OFL.txt
+--------------------------------------------------------------------
+UI表示名: 見出し明朝
+ファイル: KaiseiTokumin-Bold.ttf
+フォント名: Kaisei Tokumin (Bold)
+配布元: https://github.com/google/fonts/tree/main/ofl/kaiseitokumin (Google Fonts)
+ライセンス: SIL Open Font License, Version 1.1
+            → KaiseiTokumin-OFL.txt
 --------------------------------------------------------------------
 UI表示名: ペン字風
 ファイル: ZenKurenaido-Regular.ttf
@@ -114,13 +142,6 @@ UI表示名: ペン字風
 配布元: https://github.com/google/fonts/tree/main/ofl/zenkurenaido (Google Fonts)
 ライセンス: SIL Open Font License, Version 1.1
             → ZenKurenaido-OFL.txt
---------------------------------------------------------------------
-UI表示名: マジック手書き
-ファイル: YuseiMagic-Regular.ttf
-フォント名: Yusei Magic
-配布元: https://github.com/google/fonts/tree/main/ofl/yuseimagic (Google Fonts)
-ライセンス: SIL Open Font License, Version 1.1
-            → YuseiMagic-OFL.txt
 --------------------------------------------------------------------
 
 各フォントの完全なライセンス条文は、同じフォルダ内の

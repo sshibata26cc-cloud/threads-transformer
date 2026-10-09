@@ -40,10 +40,13 @@ FONT_FILES = {
     "オールド明朝": "ZenOldMincho-Regular.ttf",  # Zen Old Mincho
     "太明朝": "ZenOldMincho-Bold.ttf",  # Zen Old Mincho Bold
     "装飾明朝": "KaiseiDecol-Regular.ttf",  # Kaisei Decol
-    "極太ゴシック": "DelaGothicOne-Regular.ttf",  # Dela Gothic One
-    "ポップ体": "RocknRollOne-Regular.ttf",  # RocknRoll One
+    "しっぽり明朝": "ShipporiMincho-Regular.ttf",  # Shippori Mincho
+    "さわらび明朝": "SawarabiMincho-Regular.ttf",  # Sawarabi Mincho
+    "ひな明朝": "HinaMincho-Regular.ttf",  # Hina Mincho
+    "アンティーク明朝": "ZenAntique-Regular.ttf",  # Zen Antique
+    "モダン明朝": "KaiseiOpti-Regular.ttf",  # Kaisei Opti
+    "見出し明朝": "KaiseiTokumin-Bold.ttf",  # Kaisei Tokumin Bold
     "ペン字風": "ZenKurenaido-Regular.ttf",  # Zen Kurenaido
-    "マジック手書き": "YuseiMagic-Regular.ttf",  # Yusei Magic
 }
 
 # 選択肢の表示順（Streamlitのselectboxにそのまま渡す）。

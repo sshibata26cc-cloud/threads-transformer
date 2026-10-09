@@ -31,6 +31,7 @@ from story_image import (
     DEFAULT_MAX_FONT_SIZE,
     DEFAULT_TEXT_BG_COLOR,
     DEFAULT_TEXT_COLOR,
+    STORY_DEFAULT_TEXT_COLOR,
     StoryImageError,
     convert_png_to_jpeg,
     generate_story_image,
@@ -581,7 +582,7 @@ if result and result["mode"] == MODE_INSTAGRAM:
         reset_id = st.session_state.design_reset_id
 
         bg_file = st.file_uploader(
-            "背景の画像・動画を選択（未指定の場合は白背景を使用します）",
+            "背景の画像・動画を選択（未指定の場合は黒背景を使用します）",
             type=["png", "jpg", "jpeg", "webp", *VIDEO_EXTENSIONS],
             key=f"story_bg_{reset_id}",
         )
@@ -620,7 +621,7 @@ if result and result["mode"] == MODE_INSTAGRAM:
         )
         text_color = st.color_picker(
             "文字色",
-            value=DEFAULT_TEXT_COLOR,
+            value=STORY_DEFAULT_TEXT_COLOR,
             key=f"story_color_{reset_id}",
         )
 

@@ -15,7 +15,7 @@ import os
 import streamlit.components.v1 as components
 from PIL import Image
 
-from story_image import BACKGROUND_COLOR, CANVAS_HEIGHT, CANVAS_WIDTH, LETTERBOX_COLOR
+from story_image import CANVAS_HEIGHT, CANVAS_WIDTH, LETTERBOX_COLOR
 
 _component = components.declare_component(
     "story_preview",
@@ -62,7 +62,7 @@ def story_preview(text_layer_url, bg_url, bg_size, fit, shade, token, key):
         token=token,
         canvas_w=CANVAS_WIDTH,
         canvas_h=CANVAS_HEIGHT,
-        canvas_color="#%02X%02X%02X" % (LETTERBOX_COLOR if bg_url else BACKGROUND_COLOR),
+        canvas_color="#%02X%02X%02X" % LETTERBOX_COLOR,
         key=key,
         default=None,
     )
