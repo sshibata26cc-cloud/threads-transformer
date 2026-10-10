@@ -1,5 +1,5 @@
 """
-ストーリーズのプレビュー表示（背景のドラッグ位置調整・改行／改ページの操作つき）。
+ストーリーズのプレビュー表示（背景のドラッグ位置調整つき）。
 
 Streamlit標準のウィジェットではドラッグ操作を受け取れないため、
 story_preview_component/index.html を双方向コンポーネントとして読み込む。
@@ -7,9 +7,8 @@ story_preview_component/index.html を双方向コンポーネントとして読
 背景をドラッグ（スマホではスライド）すると、その場で背景だけが動く。
 指を離した時点の位置がPython側へ返り、PNG・動画の書き出しに使われる。
 
-文字をクリック（タップ）するとその位置にカーソルが立ち、「改行」「改ページ」
-ボタンで、カーソル位置への操作がPython側へ返る（実際の文章の変更は
-story_pages.pyで行う）。
+複数ページあるときは、全ページの文字レイヤーを渡しておき、
+「前へ／次へ」での切り替えはブラウザ内だけで行う。
 """
 
 import base64
@@ -50,47 +49,22 @@ def background_fill_data_url(image: Image.Image) -> str:
     return to_data_url(buffer.getvalue(), "image/jpeg")
 
 
-def story_preview(
-    text_layer_url,
-    layout,
-    bg_url,
-    bg_size,
-    fit,
-    shade,
-    token,
-    key,
-    page_id,
-    page_index=0,
-    page_count=1,
-    can_undo=False,
-    fill_url=None,
-):
+def story_preview(text_layer_urls, bg_url, bg_size, fit, shade, token, key, fill_url=None):
     """
-    プレビューを表示する。
+    プレビューを表示し、現在の背景のずれ (x, y)（キャンバスのpx）を返す。
 
     引数:
-        text_layer_url: 文字レイヤー（透明PNG）のdata URL。
-        layout: render_story_text_layer_with_layout()の行ごとの配置情報。
-                プレビュー上で文字の間にカーソルを置くために使う。
+        text_layer_urls: ページごとの文字レイヤー（透明PNG）のdata URLのリスト。
         bg_url: 背景のdata URL。背景なしの場合はNone。
         bg_size: 背景の元の (幅, 高さ)。背景なしの場合はNone。
         fill_url: 余白を埋めるぼかし背景のdata URL。背景なしの場合はNone。
         fit: story_image.BG_FIT_WIDTH / BG_FIT_HEIGHT。
         shade: 背景の暗さ（0.0〜0.8）。
         token: 背景と差し込み方を表す識別子。変わると位置は中央へ戻る。
-        page_id / page_index / page_count: 表示中のページ。
-        can_undo: 「元に戻す」を押せる状態かどうか。
-
-    戻り値: (背景のずれ (x, y)（キャンバスのpx）, 操作 または None)
-        操作は {"type": "newline" | "pagebreak" | "undo" | "reset" | "prev" | "next",
-        "index": カーソルの文字位置（newline / pagebreakのみ）, "nonce": 操作ごとの識別子}。
-        コンポーネントの値は再実行をまたいで残るので、同じ操作を二重に
-        適用しないよう、呼び出し側でnonceを見て判定すること。
     """
     bg_w, bg_h = bg_size or (CANVAS_WIDTH, CANVAS_HEIGHT)
     value = _component(
-        text=text_layer_url,
-        layout=layout,
+        texts=text_layer_urls,
         bg=bg_url,
         fill=fill_url,
         bg_w=bg_w,
@@ -98,21 +72,16 @@ def story_preview(
         fit=fit,
         shade=shade,
         token=token,
-        page_id=page_id,
-        page_index=page_index,
-        page_count=page_count,
-        can_undo=can_undo,
         canvas_w=CANVAS_WIDTH,
         canvas_h=CANVAS_HEIGHT,
         canvas_color="#%02X%02X%02X" % LETTERBOX_COLOR,
         key=key,
         default=None,
     )
-    if not value:
-        return (0, 0), None
-    # 別の背景・別の差し込み方のときに返ってきた古い位置は使わない。
-    offset = (value.get("x", 0), value.get("y", 0)) if value.get("token") == token else (0, 0)
-    return offset, value.get("action")
+    # 別の背景・別の差し込み方のときに返ってきた古い値は使わない。
+    if not value or value.get("token") != token:
+        return (0, 0)
+    return (value.get("x", 0), value.get("y", 0))
 
 
 def inject_mobile_media_picker_fix():

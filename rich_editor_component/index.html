@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; }
+  body { font-family: "Hiragino Sans", "Yu Gothic", "Noto Sans JP", sans-serif; color: #3B2E27; }
+  #bar {
+    display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center;
+    padding: 8px; background: #FBF6EC; border: 1px solid #D9CBB8; border-bottom: none;
+    border-radius: 10px 10px 0 0;
+  }
+  .grp { display: flex; gap: 4px; align-items: center; }
+  .grp + .grp { padding-left: 10px; border-left: 1px solid #D9CBB8; }
+  .lbl { font-size: 12px; color: #6B5A4E; margin-right: 2px; }
+  button {
+    font: inherit; font-size: 13px; color: #3B2E27; background: #fff; border: 1px solid #C9B8A4;
+    border-radius: 7px; padding: 6px 10px; cursor: pointer; white-space: nowrap;
+    -webkit-tap-highlight-color: transparent;
+  }
+  button:active { background: #F0E4D2; }
+  #ed {
+    min-height: 200px; padding: 12px 14px; background: #fff; border: 1px solid #D9CBB8;
+    border-radius: 0 0 10px 10px; outline: none;
+    font-size: 16px; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere;
+    -webkit-user-select: text; user-select: text;
+  }
+  #ed:focus { border-color: #A9673F; box-shadow: 0 0 0 1px #A9673F inset; }
+  #ed > div { min-height: 1.75em; }
+  .pb {
+    display: flex; align-items: center; gap: 8px; margin: 8px 0; padding: 2px 0;
+    color: #A9673F; font-size: 12.5px; font-weight: 600; user-select: none; -webkit-user-select: none;
+  }
+  .pb::before, .pb::after { content: ""; flex: 1; border-top: 2px dashed #C9A27F; }
+  .pb button { padding: 1px 8px; font-size: 12px; font-weight: 400; }
+  #note { padding: 6px 2px 0; font-size: 12.5px; color: #6B5A4E; min-height: 1.4em; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <div class="grp">
+    <button type="button" data-cmd="left">左寄せ</button>
+    <button type="button" data-cmd="center">中央寄せ</button>
+    <button type="button" data-cmd="right">右寄せ</button>
+  </div>
+  <div class="grp">
+    <span class="lbl">文字サイズ</span>
+    <button type="button" data-cmd="smaller">小さく</button>
+    <button type="button" data-cmd="larger">大きく</button>
+    <button type="button" data-cmd="normal">標準に戻す</button>
+  </div>
+  <div class="grp" id="pbgrp">
+    <button type="button" data-cmd="pagebreak">改ページ</button>
+  </div>
+</div>
+<div id="ed" contenteditable="true" spellcheck="false"></div>
+<div id="note"></div>
+<script>
+(function () {
+  var ed = document.getElementById("ed");
+  var note = document.getElementById("note");
+
+  var SIZE_STEP = 4, MIN_SIZE = 12, MAX_SIZE = 160;  // rich_text.pyのMIN/MAX_RUN_SIZEと揃える
+  var COMMIT_DELAY = 500;  // 入力が止まってからPython側へ送るまでの時間（ms）
+
+  var base = 35;        // 標準の文字サイズ（px。画像上の大きさ）
+  var rev = null;       // Python側がこの文書を作り直した回数。変わったら編集欄を作り直す
+  var savedRange = null;
+  var timer = null;
+
+  function send(type, data) {
+    window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data || {}), "*");
+  }
+  function resize() { send("streamlit:setFrameHeight", { height: Math.ceil(document.body.getBoundingClientRect().height) + 2 }); }
+
+  // ---------------- 文書 ⇔ 画面 ----------------
+  // 編集欄の中では、画像上のサイズを「標準サイズ＝16px」の比率に直して表示する。
+  function displaySize(size) {
+    return Math.max(10, Math.min(48, 16 * (size || base) / base)) + "px";
+  }
+  function refreshSizes() {
+    var spans = ed.querySelectorAll("[data-s]");
+    for (var i = 0; i < spans.length; i++) {
+      spans[i].style.fontSize = displaySize(parseInt(spans[i].getAttribute("data-s"), 10));
+    }
+  }
+  function makePageBreak() {
+    var el = document.createElement("div");
+    el.className = "pb";
+    el.contentEditable = "false";
+    el.appendChild(document.createTextNode("改ページ"));
+    var del = document.createElement("button");
+    del.type = "button";
+    del.textContent = "取り消す";
+    del.addEventListener("click", function () { el.remove(); ensureBlock(); changed(true); });
+    el.appendChild(del);
+    return el;
+  }
+  function makeParagraph(item) {
+    var p = document.createElement("div");
+    if (item && item.align && item.align !== "left") p.style.textAlign = item.align;
+    var runs = (item && item.runs) || [];
+    for (var i = 0; i < runs.length; i++) {
+      if (runs[i].s) {
+        var span = document.createElement("span");
+        span.setAttribute("data-s", runs[i].s);
+        span.textContent = runs[i].t;
+        p.appendChild(span);
+      } else {
+        p.appendChild(document.createTextNode(runs[i].t));
+      }
+    }
+    if (!p.textContent) p.appendChild(document.createElement("br"));
+    return p;
+  }
+  function ensureBlock() {
+    if (!ed.firstChild) ed.appendChild(makeParagraph(null));
+    // 改ページの直後で終わっていると、その後ろに文字を打てないので空行を足す。
+    if (ed.lastChild.classList && ed.lastChild.classList.contains("pb")) ed.appendChild(makeParagraph(null));
+  }
+  function build(doc) {
+    ed.innerHTML = "";
+    for (var i = 0; i < (doc || []).length; i++) {
+      ed.appendChild(doc[i].pb ? makePageBreak() : makeParagraph(doc[i]));
+    }
+    ensureBlock();
+    refreshSizes();
+    savedRange = null;
+  }
+
+  function isBlock(el) { return /^(DIV|P|LI|UL|OL|H[1-6]|BLOCKQUOTE|PRE)$/.test(el.tagName); }
+  function alignOf(el) {
+    var a = getComputedStyle(el).textAlign || "";
+    if (a.indexOf("center") >= 0) return "center";
+    if (a.indexOf("right") >= 0 || a === "end") return "right";
+    return "left";
+  }
+  function sizeOf(node) {
+    var el = (node.nodeType === 1 ? node : node.parentElement);
+    el = el && el.closest("[data-s]");
+    if (!el || !ed.contains(el)) return null;
+    return parseInt(el.getAttribute("data-s"), 10) || null;
+  }
+
+  // 編集欄の中身を文書（rich_text.pyの形式）に読み取る。
+  function serialize() {
+    var out = [], cur = null, pending = false;
+    function open(blockEl) { cur = { align: alignOf(blockEl), runs: [] }; out.push(cur); pending = false; }
+    function addText(text, size) {
+      text = text.replace(/ /g, " ").replace(/[​\r\n]/g, "");
+      if (!text) return;
+      var last = cur.runs[cur.runs.length - 1];
+      if (last && last.s === size) last.t += text; else cur.runs.push({ t: text, s: size });
+    }
+    function walk(parent, blockEl) {
+      for (var ch = parent.firstChild; ch; ch = ch.nextSibling) {
+        if (ch.nodeType === 3) {
+          if (!cur || pending) open(blockEl);
+          addText(ch.nodeValue, sizeOf(ch));
+        } else if (ch.nodeType !== 1) {
+          continue;
+        } else if (ch.tagName === "BR") {
+          // 行の途中の改行（Shift+Enter）は段落の区切りとして扱う。
+          // ブロック末尾の<br>は空行を表示するための詰め物なので無視する。
+          if (!cur || pending) open(blockEl);
+          pending = true;
+        } else if (ch.classList.contains("pb")) {
+          out.push({ pb: true }); cur = null; pending = false;
+        } else if (isBlock(ch)) {
+          open(ch); walk(ch, ch); cur = null; pending = false;
+        } else {
+          walk(ch, blockEl);
+        }
+      }
+    }
+    walk(ed, ed);
+    return out;
+  }
+
+  function commit() {
+    clearTimeout(timer);
+    timer = null;
+    send("streamlit:setComponentValue", { value: { doc: serialize(), rev: rev }, dataType: "json" });
+  }
+  function changed(now) {
+    resize();
+    clearTimeout(timer);
+    if (now) commit(); else timer = setTimeout(commit, COMMIT_DELAY);
+  }
+
+  // ---------------- 選択範囲 ----------------
+  // ボタンを押すと編集欄からフォーカスが外れて選択が消えることがあるので、
+  // 最後の選択範囲を覚えておき、操作の前に戻す。
+  document.addEventListener("selectionchange", function () {
+    var sel = document.getSelection();
+    if (sel.rangeCount && ed.contains(sel.getRangeAt(0).commonAncestorContainer)) {
+      savedRange = sel.getRangeAt(0).cloneRange();
+    }
+  });
+  function restoreSelection() {
+    if (!savedRange) return null;
+    ed.focus();
+    var sel = document.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(savedRange);
+    return sel.getRangeAt(0);
+  }
+  function topBlock(node) {
+    while (node && node.parentNode !== ed) node = node.parentNode;
+    return node && node.nodeType === 1 ? node : null;
+  }
+  function say(text) { note.textContent = text; resize(); }
+
+  // ---------------- 操作 ----------------
+  // 寄せ: 選択範囲にかかっている行（段落）すべてに適用する。選択していなければカーソルのある行。
+  function setAlign(align) {
+    var range = restoreSelection();
+    if (!range) return say("寄せを変える行をクリック（タップ）するか、範囲を選択してください。");
+    var block = topBlock(range.startContainer) || ed.firstChild;
+    var last = topBlock(range.endContainer) || block;
+    for (; block; block = block.nextSibling) {
+      if (block.nodeType === 1 && !block.classList.contains("pb")) {
+        block.style.textAlign = align === "left" ? "" : align;
+      }
+      if (block === last) break;
+    }
+    say("");
+    changed(true);
+  }
+
+  // 文字サイズ: 選択した文字だけに適用する。
+  function setSize(mode) {
+    var range = restoreSelection();
+    if (!range || range.collapsed) return say("サイズを変える文字を、ドラッグ（スマホは長押し）で選択してください。");
+
+    var probe = range.startContainer;
+    if (probe.nodeType === 1) probe = probe.childNodes[range.startOffset] || probe;
+    var current = sizeOf(probe) || base;
+    var size = mode === "normal" ? 0
+      : Math.max(MIN_SIZE, Math.min(MAX_SIZE, current + (mode === "larger" ? SIZE_STEP : -SIZE_STEP)));
+
+    // 選択範囲を確実に分割して囲むために、ブラウザ標準のfontSize操作で一旦
+    // <font size="7">に囲ませ、それを自前のspan[data-s]へ置き換える。
+    document.execCommand("styleWithCSS", false, false);
+    document.execCommand("fontSize", false, "7");
+    var fonts = ed.querySelectorAll('font[size="7"]');
+    var sel = document.getSelection();
+    var first = null, lastSpan = null;
+    for (var i = 0; i < fonts.length; i++) {
+      var span = document.createElement("span");
+      span.setAttribute("data-s", size);  // 0 は「標準サイズ」（外側のサイズ指定を打ち消す）
+      while (fonts[i].firstChild) span.appendChild(fonts[i].firstChild);
+      var inner = span.querySelectorAll("[data-s]");
+      for (var j = 0; j < inner.length; j++) inner[j].setAttribute("data-s", size);
+      fonts[i].replaceWith(span);
+      // 同じ文字に何度もサイズを指定しても、spanが入れ子に増えていかないようにする。
+      var outer = span.parentElement;
+      if (outer !== ed && outer.hasAttribute("data-s") && outer.childNodes.length === 1) {
+        outer.replaceWith(span);
+      }
+      first = first || span;
+      lastSpan = span;
+    }
+    refreshSizes();
+    if (first) {
+      var r = document.createRange();
+      r.setStartBefore(first);
+      r.setEndAfter(lastSpan);
+      sel.removeAllRanges();
+      sel.addRange(r);
+      savedRange = r.cloneRange();
+    }
+    say(size ? "選択した文字のサイズ: " + size + "（標準は " + base + "）" : "選択した文字を標準サイズに戻しました。");
+    changed(true);
+  }
+
+  // 改ページ: カーソルのある位置で行を分け、その間に区切りを入れる。
+  function insertPageBreak() {
+    var range = restoreSelection();
+    if (!range) return say("改ページを入れる位置をクリック（タップ）してください。");
+    range.collapse(true);
+    var block = topBlock(range.startContainer);
+    var pb = makePageBreak();
+    if (!block || block.classList.contains("pb")) {
+      ed.appendChild(pb);
+    } else {
+      var tail = document.createRange();
+      tail.setStart(range.startContainer, range.startOffset);
+      tail.setEnd(block, block.childNodes.length);
+      var after = block.cloneNode(false);
+      after.appendChild(tail.extractContents());
+      if (!after.textContent) after.innerHTML = "<br>";
+      if (!block.textContent) {
+        // 行の先頭で押した場合: その行の前に区切りを入れるだけにする。
+        block.replaceWith(pb, after);
+      } else {
+        block.after(pb, after);
+      }
+      var caret = document.createRange();
+      caret.setStart(after, 0);
+      caret.collapse(true);
+      var sel = document.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(caret);
+      savedRange = caret.cloneRange();
+    }
+    ensureBlock();
+    say("");
+    changed(true);
+  }
+
+  var buttons = document.querySelectorAll("#bar button");
+  for (var i = 0; i < buttons.length; i++) {
+    // 押した瞬間に編集欄の選択が外れないようにする。
+    buttons[i].addEventListener("pointerdown", function (e) { e.preventDefault(); });
+    buttons[i].addEventListener("mousedown", function (e) { e.preventDefault(); });
+    buttons[i].addEventListener("click", function (e) {
+      var cmd = e.currentTarget.getAttribute("data-cmd");
+      if (cmd === "left" || cmd === "center" || cmd === "right") setAlign(cmd);
+      else if (cmd === "pagebreak") insertPageBreak();
+      else setSize(cmd);
+    });
+  }
+
+  ed.addEventListener("input", function () { ensureBlock(); changed(false); });
+  ed.addEventListener("blur", function () { if (timer) commit(); });
+  // 貼り付けは書式を持ち込まず、文字だけを入れる。
+  ed.addEventListener("paste", function (e) {
+    e.preventDefault();
+    var text = (e.clipboardData || window.clipboardData).getData("text/plain");
+    document.execCommand("insertText", false, text.replace(/\r\n?/g, "\n"));
+  });
+
+  window.addEventListener("message", function (e) {
+    if (!e.data || e.data.type !== "streamlit:render") return;
+    var args = e.data.args;
+    base = args.base_size || base;
+    document.getElementById("pbgrp").style.display = args.allow_pagebreak ? "flex" : "none";
+    if (args.rev !== rev) {
+      // 初回、またはPython側で文書が作り直された（元に戻す・最初の状態に戻す等）。
+      rev = args.rev;
+      clearTimeout(timer);
+      timer = null;
+      build(args.doc);
+      say("");
+    } else {
+      refreshSizes();
+    }
+    resize();
+  });
+  window.addEventListener("resize", resize);
+
+  send("streamlit:componentReady", { apiVersion: 1 });
+})();
+</script>
+</body>
+</html>

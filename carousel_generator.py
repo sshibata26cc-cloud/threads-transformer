@@ -1,33 +1,27 @@
 """
 Instagramカルーセル投稿用のページ画像（1080x1350 / 4:5）を生成するモジュール。
 
-背景画像のcover/crop、文字の折り返し、フォントサイズの自動縮小、
+背景画像のcover/crop、文字の折り返し、文字サイズの自動縮小、行ごとの寄せ、
 文字の背景色（帯）の描画など、画像処理の中身はStoryズ機能
-（story_image.py）の処理をそのまま再利用しており、重複実装はしていない。
+（story_image.py / rich_text.py）の処理をそのまま再利用しており、
+重複実装はしていない。
 
 Storyズ機能と同じく、ページの文章のみを縦方向に中央寄せして表示する
 （背景は常にcover＝全面を埋める差し込み方で、位置調整はない）。
 """
 
-import io
-
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from app_fonts import DEFAULT_FONT_KEY
+from rich_text import render_rich_text_layer
 from story_image import (
     BACKGROUND_COLOR,
     DEFAULT_MAX_FONT_SIZE,
     DEFAULT_TEXT_COLOR,
-    FONT_STEP,
-    LINE_HEIGHT_RATIO,
     MARGIN_X,
     MAX_OVERLAY_OPACITY,
-    MIN_BODY_FONT_SIZE,
     _cover_resize,
-    _draw_text_backgrounds,
-    _hex_to_rgb,
-    _load_font,
-    _wrap_text_block,
+    image_to_png_bytes,
 )
 
 CAROUSEL_WIDTH = 1080
@@ -39,7 +33,7 @@ CAROUSEL_MARGIN_Y = 100
 
 
 def generate_carousel_page_image(
-    text,
+    doc,
     background_image=None,
     text_color=DEFAULT_TEXT_COLOR,
     text_bg_color=None,
@@ -50,72 +44,41 @@ def generate_carousel_page_image(
     """
     カルーセルの1ページ分（1080x1350）のPNG画像を生成する。
 
-    textの内容は一切変更せず、そのまま描画する。
-    文字量が多い場合、max_font_sizeを上限としてフォントサイズを自動的に
-    縮小し、画像の外へはみ出さないようにする（Storyズと同じ考え方）。
-
     引数:
+        doc: 1ページぶんの文書（rich_text.pyの形式）。
         background_image: load_background_image()で読み込み済みのRGB画像、
                            またはNone（Noneの場合は白背景を使用）。
         text_color: 文字色（"#RRGGBB"形式）。
         text_bg_color: 文字の背景色（"#RRGGBB"形式）。
                        None（既定値）の場合は文字背景を描画しない（透明）。
-        max_font_size: ユーザーが希望するフォントサイズの上限。
+        max_font_size: 標準の文字サイズ（部分的にサイズを指定していない文字に使う）。
         overlay_opacity: 背景画像の上に重ねる黒レイヤーの不透明度（0.0〜0.8）。
                          background_imageがNoneの場合は無視される。
         font_key: app_fonts.FONT_OPTIONSのいずれか（全ページ共通の1つを想定）。
 
     戻り値: (PNGのバイト列, 警告メッセージ または None)
     """
-    canvas = Image.new("RGBA", (CAROUSEL_WIDTH, CAROUSEL_HEIGHT), BACKGROUND_COLOR + (255,))
+    canvas = Image.new("RGB", (CAROUSEL_WIDTH, CAROUSEL_HEIGHT), BACKGROUND_COLOR)
 
     if background_image is not None:
-        covered = _cover_resize(background_image, CAROUSEL_WIDTH, CAROUSEL_HEIGHT)
-        canvas.paste(covered.convert("RGBA"), (0, 0))
+        canvas.paste(_cover_resize(background_image, CAROUSEL_WIDTH, CAROUSEL_HEIGHT), (0, 0))
 
         opacity = max(0.0, min(overlay_opacity or 0.0, MAX_OVERLAY_OPACITY))
         if opacity > 0:
-            overlay = Image.new("RGBA", canvas.size, (0, 0, 0, round(opacity * 255)))
-            canvas = Image.alpha_composite(canvas, overlay)
+            canvas = Image.blend(canvas, Image.new("RGB", canvas.size, (0, 0, 0)), opacity)
 
-    draw = ImageDraw.Draw(canvas)
-    text_rgb = _hex_to_rgb(text_color)
-    text_bg_rgb = _hex_to_rgb(text_bg_color) if text_bg_color else None
+    text_layer, warning = render_rich_text_layer(
+        doc,
+        (CAROUSEL_WIDTH, CAROUSEL_HEIGHT),
+        CAROUSEL_MARGIN_X,
+        CAROUSEL_MARGIN_Y,
+        CAROUSEL_MARGIN_Y,
+        text_color=text_color,
+        text_bg_color=text_bg_color,
+        base_size=max_font_size,
+        font_key=font_key,
+        overflow_hint="ページを分けるか、文章を短くしてください。",
+    )
+    canvas.paste(text_layer, (0, 0), mask=text_layer)
 
-    max_width = CAROUSEL_WIDTH - CAROUSEL_MARGIN_X * 2
-    available_height = CAROUSEL_HEIGHT - CAROUSEL_MARGIN_Y * 2
-
-    font_size = max(MIN_BODY_FONT_SIZE, max_font_size or DEFAULT_MAX_FONT_SIZE)
-    body_font = _load_font(font_size, font_key=font_key, sample_text=text)
-    lines = _wrap_text_block(draw, text or "", body_font, max_width)
-    line_height = int(font_size * LINE_HEIGHT_RATIO)
-    total_height = len(lines) * line_height
-
-    while total_height > available_height and font_size > MIN_BODY_FONT_SIZE:
-        font_size -= FONT_STEP
-        body_font = _load_font(font_size, font_key=font_key, sample_text=text)
-        lines = _wrap_text_block(draw, text or "", body_font, max_width)
-        line_height = int(font_size * LINE_HEIGHT_RATIO)
-        total_height = len(lines) * line_height
-
-    warning = None
-    if total_height > available_height:
-        warning = (
-            "文章量が多いため、文字サイズがかなり小さくなっています。"
-            "ページを分けるか、文章を短くすることをおすすめします。"
-        )
-
-    # 文章全体を縦方向の中央に配置する。
-    y = CAROUSEL_MARGIN_Y + max(0, (available_height - total_height) // 2)
-
-    text_items = [(CAROUSEL_MARGIN_X, y + i * line_height, line, body_font) for i, line in enumerate(lines)]
-
-    if text_bg_rgb is not None:
-        _draw_text_backgrounds(draw, text_items, text_bg_rgb)
-
-    for item_x, item_y, line, item_font in text_items:
-        draw.text((item_x, item_y), line, font=item_font, fill=text_rgb)
-
-    buffer = io.BytesIO()
-    canvas.convert("RGB").save(buffer, format="PNG")
-    return buffer.getvalue(), warning
+    return image_to_png_bytes(canvas), warning

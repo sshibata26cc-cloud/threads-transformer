@@ -26,6 +26,8 @@ from cloudinary_storage import (
 )
 from instagram_api import InstagramAPIError, get_instagram_credentials, post_story
 from reply_filters import filter_own_replies
+from rich_editor import editor_value, rich_editor
+from rich_text import split_pages, text_to_doc
 from story_image import (
     BG_FIT_HEIGHT,
     BG_FIT_WIDTH,
@@ -38,9 +40,8 @@ from story_image import (
     generate_story_image,
     image_to_png_bytes,
     load_background_image,
-    render_story_text_layer_with_layout,
+    render_story_text_layer,
 )
-from story_pages import ACTION_NEWLINE, ACTION_PAGEBREAK, apply_text_action, initial_pages
 from story_preview import (
     background_fill_data_url,
     background_preview_data_url,
@@ -113,8 +114,6 @@ ACCOUNT_CHOICES = ["takuma_o369", "shin.coaching", "masa_life128"]
 # カルーセルのUndo/Redo履歴として保持する最大件数。
 # これを超えたら、最も古い履歴から削除する。
 CAROUSEL_HISTORY_LIMIT = 20
-# ストーリーズの改行・改ページの「元に戻す」履歴として保持する最大件数。
-STORY_HISTORY_LIMIT = 30
 
 
 # --------------------------------------------------------------------
@@ -200,29 +199,33 @@ def _cached_preview_background(bg_cache_key, _background_image):
     )
 
 
+def _doc_key(doc) -> str:
+    """文書（rich_text.pyの形式）を、キャッシュのキーに使える文字列にする。"""
+    return json.dumps(doc, ensure_ascii=False, sort_keys=True)
+
+
 @st.cache_data(show_spinner=False, max_entries=60)
-def _cached_story_text_layer(page_text, text_color, text_bg_color, max_font_size, font_key):
+def _cached_story_text_layer(doc_key, text_color, text_bg_color, max_font_size, font_key):
     """
     ストーリーズ1ページぶんの、文字だけを描いた透明レイヤー（PNG）をキャッシュする。
     プレビューでは背景の上に重ねて表示し、動画の書き出しでは動画の上に合成する。
 
-    戻り値: (PNGのバイト列, 警告メッセージ または None, 行ごとの配置情報)
-    配置情報は、プレビュー上で文字の間にカーソルを置くために使う。
+    doc_keyは_doc_key()で文字列にした1ページぶんの文書。
+    戻り値: (PNGのバイト列, 警告メッセージ または None)
     """
-    layer, warning, layout = render_story_text_layer_with_layout(
-        page_text,
-        [],
+    layer, warning = render_story_text_layer(
+        json.loads(doc_key),
         text_color=text_color,
         text_bg_color=text_bg_color,
         max_font_size=max_font_size,
         font_key=font_key,
     )
-    return image_to_png_bytes(layer), warning, layout
+    return image_to_png_bytes(layer), warning
 
 
 @st.cache_data(show_spinner=False, max_entries=60)
 def _cached_story_image(
-    page_text,
+    doc_key,
     bg_cache_key,
     text_color,
     text_bg_color,
@@ -240,8 +243,7 @@ def _cached_story_image(
     Instagram投稿は、この関数が返す同じ結果をそのまま使う。
     """
     return generate_story_image(
-        original_text=page_text,
-        own_replies=[],
+        json.loads(doc_key),
         background_image=_background_image,
         text_color=text_color,
         text_bg_color=text_bg_color,
@@ -255,7 +257,7 @@ def _cached_story_image(
 
 @st.cache_data(show_spinner=False, max_entries=80)
 def _cached_carousel_page_image(
-    page_text,
+    doc_key,
     bg_cache_key,
     text_color,
     text_bg_color,
@@ -275,7 +277,7 @@ def _cached_carousel_page_image(
     新しく追加されたページだけが実際に再生成される。
     """
     return generate_carousel_page_image(
-        page_text,
+        json.loads(doc_key),
         background_image=_background_image,
         text_color=text_color,
         text_bg_color=text_bg_color,
@@ -352,7 +354,7 @@ def _current_carousel_state(reset_id):
     page_ids = list(st.session_state.carousel_page_ids)
     return {
         "page_ids": page_ids,
-        "texts": {pid: st.session_state.carousel_store.get(pid, "") for pid in page_ids},
+        "texts": {pid: st.session_state.carousel_store.get(pid, []) for pid in page_ids},
         "selected_id": st.session_state.carousel_selected_id,
         "design": _current_carousel_design(reset_id),
     }
@@ -362,15 +364,13 @@ def _apply_carousel_state(state, reset_id):
     """
     Undo/Redoで選んだスナップショットの内容を、実際のセッション状態へ書き戻す。
 
-    carousel_active_editor（共有テキスト編集欄）は、この時点ではまだ
-    今回の実行で描画されていないため、直接書き込んでも問題ない。
-    ただし「選択中ページは変わらないが本文だけ戻したい」というUndoもあり得るため、
-    次の描画時に必ずcarousel_active_editorへ再同期させるフラグを立てておく。
+    本文（文書）をPython側で差し替えるので、編集欄がそれを読み込み直すよう
+    carousel_doc_revを進める（rich_editor.pyを参照）。
     """
     st.session_state.carousel_page_ids = list(state["page_ids"])
     st.session_state.carousel_store = dict(state["texts"])
     st.session_state.carousel_selected_id = state["selected_id"]
-    st.session_state.carousel_force_editor_resync = True
+    st.session_state.carousel_doc_rev += 1
 
     design_keys = _carousel_design_keys(reset_id)
     for name, value in state.get("design", {}).items():
@@ -444,24 +444,20 @@ def _reset_carousel_pages(pages_text):
     """
     Threadsから新しく取得した内容をもとに、カルーセルのページ構成を作り直す。
 
-    各ページにUUIDの内部IDを割り当て、その本文を carousel_store（プレーンな
-    dict）へ保存する。あわせて、Undo/Redo履歴もこの状態を起点として作り直す
+    各ページにUUIDの内部IDを割り当て、その本文を書式なしの文書（rich_text.pyの
+    形式）にして carousel_store（プレーンなdict）へ保存する。あわせて、Undo/Redo
+    履歴もこの状態を起点として作り直す
     （別のThreads投稿を新しく変換したときだけ、ここが呼ばれる）。
     """
     new_ids = [_new_carousel_page_id() for _ in pages_text]
+    pages_doc = [text_to_doc(text) for text in pages_text]
     st.session_state.carousel_page_ids = new_ids
-    st.session_state.carousel_store = dict(zip(new_ids, pages_text))
+    st.session_state.carousel_store = dict(zip(new_ids, pages_doc))
     st.session_state.carousel_selected_id = new_ids[0] if new_ids else None
-
-    # 共有テキスト編集欄（carousel_active_editor）も、選択中の先頭ページの
-    # 本文へ合わせておく。まだ今回の実行でこのウィジェットは描画されていないため、
-    # ここでsession_stateへ直接書き込んでも問題ない。
-    st.session_state.carousel_active_editor = pages_text[0] if pages_text else ""
-    st.session_state.carousel_editor_owner_id = st.session_state.carousel_selected_id
 
     initial_state = {
         "page_ids": list(new_ids),
-        "texts": dict(zip(new_ids, pages_text)),
+        "texts": dict(zip(new_ids, pages_doc)),
         "selected_id": st.session_state.carousel_selected_id,
         "design": _default_carousel_design(),
     }
@@ -510,24 +506,24 @@ if "story_video_export" not in st.session_state:
     # 書き出し済みのストーリーズ動画 {"signature": 設定の識別子, "videos": ページ順のMP4}。
     st.session_state.story_video_export = None
 if "story_edit" not in st.session_state:
-    # ストーリーズの改行・改ページの編集状態（ストーリーズデザイン欄で初期化する）。
+    # ストーリーズの文章の編集状態（ストーリーズデザイン欄で初期化する）。
     st.session_state.story_edit = None
 if "carousel_page_ids" not in st.session_state:
     st.session_state.carousel_page_ids = []
 if "carousel_store" not in st.session_state:
-    # ページID -> 本文 のプレーンなdict。
-    # st.text_areaのwidget keyとしては使わない専用の保存領域にすることで、
-    # 選択中でなくなったページの本文がStreamlitのウィジェット破棄処理で
-    # 消えてしまわないようにしている（詳細は_apply_carousel_state等を参照）。
+    # ページID -> 本文（rich_text.pyの文書形式） のプレーンなdict。
+    # 編集欄（コンポーネント）は選択中の1ページぶんしか描画しないため、
+    # 選択中でないページの本文もここに保持しておく。
     st.session_state.carousel_store = {}
+if "carousel_doc_rev" not in st.session_state:
+    # Python側で本文を差し替える（Undo/Redo）たびに進める番号。
+    st.session_state.carousel_doc_rev = 0
 if "carousel_selected_id" not in st.session_state:
     st.session_state.carousel_selected_id = None
 if "carousel_history" not in st.session_state:
     st.session_state.carousel_history = []
 if "carousel_history_index" not in st.session_state:
     st.session_state.carousel_history_index = 0
-if "carousel_force_editor_resync" not in st.session_state:
-    st.session_state.carousel_force_editor_resync = False
 
 st.markdown('<div class="tt-step-title">1. Threadsアカウントを選択</div>', unsafe_allow_html=True)
 with st.container(border=True):
@@ -781,34 +777,50 @@ if result and result["mode"] == MODE_INSTAGRAM:
             with st.expander("デバッグ情報（エラー詳細）"):
                 st.write(e.detail or "詳細情報はありません。")
 
-    # --- ページ（改行・改ページの編集結果）の状態 ---
-    # 変換し直すたび（reset_idが変わるたび）に、本文と返信をつないだ1ページへ戻す。
+    # --- 文章の編集 ---
+    # 文章は「書式つきの文書」として持つ。変換し直すたび（reset_idが変わるたび）に、
+    # Threadsの本文と返信を空行でつないだ、書式なしの文書へ戻す。
+    # revは、Python側で文書を作り直すたびに進める番号（編集欄がそれを見て
+    # 表示を読み込み直す。rich_editor.pyを参照）。
+    def _initial_story_doc():
+        return text_to_doc("\n\n".join([result["original_text"]] + result["reply_texts"]))
+
     story_edit = st.session_state.story_edit
     if story_edit is None or story_edit["reset_id"] != reset_id:
-        story_edit = {
-            "reset_id": reset_id,
-            "pages": initial_pages(result["original_text"], result["reply_texts"]),
-            "index": 0,
-            "history": [],  # 「元に戻す」用。操作前の (pages, index) を積む
-            "last_nonce": None,
-        }
+        story_edit = {"reset_id": reset_id, "doc": _initial_story_doc(), "rev": 0}
         st.session_state.story_edit = story_edit
-    story_pages = story_edit["pages"]
-    story_page_index = min(story_edit["index"], len(story_pages) - 1)
+
+    st.markdown('<div class="tt-step-title">文章の編集</div>', unsafe_allow_html=True)
+    st.caption(
+        "文字はそのまま入力・削除できます。寄せは行ごと、文字サイズは選択した文字に"
+        "適用されます。「改ページ」を入れると、その位置から次の画像（2枚目以降）になります。"
+    )
+    story_edit["doc"] = rich_editor(
+        story_edit["doc"],
+        rev=story_edit["rev"],
+        base_size=font_size,
+        key=f"story_editor_{reset_id}",
+        allow_pagebreak=True,
+    )
+    if st.button("文章を最初の状態に戻す", key=f"story_doc_reset_{reset_id}"):
+        story_edit["doc"] = _initial_story_doc()
+        story_edit["rev"] += 1
+        st.rerun()
+
+    story_pages = split_pages(story_edit["doc"])  # ページごとの文書
     story_page_count = len(story_pages)
 
-    # 「プレビューを更新」ボタンは使わず、上のデザイン設定を変更するたびに、
+    # 「プレビューを更新」ボタンは使わず、文章やデザイン設定を変更するたびに、
     # Streamlitのwidget再実行の仕組みを利用して、現在の入力値からその場で
     # 文字レイヤーを再生成する。Threads APIは呼ばず、ローカルのPillow処理のみ。
     # プレビューは「背景」と「文字レイヤー」をブラウザ側で重ねて表示しており、
     # 背景をドラッグした位置（bg_offset）が書き出しにそのまま使われる。
-    # 文字レイヤーは全ページぶん作る（プレビューに出すのは表示中の1ページ）。
-    page_layers = []  # ページごとの (文字レイヤーPNG, 警告, 配置情報)
+    page_layers = []  # ページごとの (文字レイヤーPNG, 警告)
     try:
         for story_page in story_pages:
             page_layers.append(
                 _cached_story_text_layer(
-                    page_text=story_page["text"],
+                    _doc_key(story_page),
                     text_color=text_color,
                     text_bg_color=text_bg_color,
                     max_font_size=font_size,
@@ -826,60 +838,27 @@ if result and result["mode"] == MODE_INSTAGRAM:
     post_media_label = "動画" if bg_is_video else "画像"
 
     if page_layers:
-        text_layer_png, current_warning, text_layout = page_layers[story_page_index]
-        if current_warning:
-            st.warning(current_warning)
+        for number, (_, page_warning) in enumerate(page_layers, start=1):
+            if page_warning:
+                st.warning(
+                    (f"{number}枚目: " if story_page_count > 1 else "") + page_warning
+                )
         st.markdown('<div class="tt-step-title">プレビュー</div>', unsafe_allow_html=True)
         preview_bg_url, preview_fill_url = (
             _cached_preview_background(preview_bg_key, background_image)
             if background_image is not None
             else (None, None)
         )
-        bg_offset, story_action = story_preview(
-            text_layer_url=to_data_url(text_layer_png, "image/png"),
-            layout=text_layout,
+        bg_offset = story_preview(
+            text_layer_urls=[to_data_url(layer_png, "image/png") for layer_png, _ in page_layers],
             bg_url=preview_bg_url,
             fill_url=preview_fill_url,
             bg_size=background_image.size if background_image is not None else None,
             fit=bg_fit,
             shade=overlay_percent / 100,
             token=f"{bg_cache_key}:{bg_fit}",
-            page_id=story_pages[story_page_index]["id"],
-            page_index=story_page_index,
-            page_count=story_page_count,
-            can_undo=bool(story_edit["history"]),
             key=f"story_preview_{reset_id}",
         )
-
-        # プレビューのボタン（改行・改ページ・元に戻す・ページ送り）の操作を反映する。
-        # コンポーネントの値は再実行をまたいで残るため、nonceで「まだ処理して
-        # いない操作」だけを1回適用し、すぐ再実行して新しい状態で描き直す。
-        if story_action and story_action.get("nonce") != story_edit["last_nonce"]:
-            story_edit["last_nonce"] = story_action.get("nonce")
-            action_type = story_action.get("type")
-            snapshot = (story_pages, story_page_index)
-            if action_type in (ACTION_NEWLINE, ACTION_PAGEBREAK):
-                applied = apply_text_action(
-                    story_pages, story_page_index, action_type, story_action.get("index")
-                )
-                if applied:
-                    story_edit["history"] = (story_edit["history"] + [snapshot])[
-                        -STORY_HISTORY_LIMIT:
-                    ]
-                    story_edit["pages"], story_edit["index"] = applied
-            elif action_type == "undo" and story_edit["history"]:
-                story_edit["pages"], story_edit["index"] = story_edit["history"].pop()
-            elif action_type == "reset" and story_edit["history"]:
-                story_edit["history"] = (story_edit["history"] + [snapshot])[-STORY_HISTORY_LIMIT:]
-                story_edit["pages"] = initial_pages(
-                    result["original_text"], result["reply_texts"]
-                )
-                story_edit["index"] = 0
-            elif action_type == "prev":
-                story_edit["index"] = max(0, story_page_index - 1)
-            elif action_type == "next":
-                story_edit["index"] = min(story_page_count - 1, story_page_index + 1)
-            st.rerun()
 
         def _page_label(number):
             """複数ページのときだけ「N枚目」を付ける。"""
@@ -894,7 +873,7 @@ if result and result["mode"] == MODE_INSTAGRAM:
                 repr(
                     (
                         bg_cache_key,
-                        [hashlib.sha256(layer_png).hexdigest() for layer_png, _, _ in page_layers],
+                        [hashlib.sha256(layer_png).hexdigest() for layer_png, _ in page_layers],
                         bg_fit,
                         bg_offset,
                         overlay_percent,
@@ -907,7 +886,7 @@ if result and result["mode"] == MODE_INSTAGRAM:
             if st.button("動画を書き出す", key="story_video_export_button", use_container_width=True):
                 try:
                     exported = []
-                    for number, (layer_png, _, _) in enumerate(page_layers, start=1):
+                    for number, (layer_png, _) in enumerate(page_layers, start=1):
                         with st.spinner(
                             f"動画を書き出しています（{number} / {story_page_count}枚目。"
                             "動画の長さによっては数分かかります）..."
@@ -960,7 +939,7 @@ if result and result["mode"] == MODE_INSTAGRAM:
             try:
                 for story_page in story_pages:
                     page_png, _ = _cached_story_image(
-                        page_text=story_page["text"],
+                        _doc_key(story_page),
                         bg_cache_key=bg_cache_key,
                         text_color=text_color,
                         text_bg_color=text_bg_color,
@@ -1200,7 +1179,6 @@ elif result and result["mode"] == MODE_CAROUSEL:
             # _push_carousel_history()は新しいUndo履歴を作らない
             # （＝クリックによる選択変更だけではUndo履歴を消費しない）。
             st.session_state.carousel_selected_id = synced_page_id
-            st.session_state.carousel_force_editor_resync = True
 
     # ドラッグ＆ドロップによる並び替え結果の反映。
     # scroll_sync_keyと同じ理由で「前回処理した値からの変化」だけを見る。
@@ -1222,8 +1200,7 @@ elif result and result["mode"] == MODE_CAROUSEL:
         ):
             # page_id・本文・選択状態はそのまま。並び順だけを変更する。
             # 選択中ページをドラッグした場合も、carousel_selected_id自体は
-            # 変更しないため、そのページを選択したまま維持される
-            # （編集欄もcarousel_selected_idが変わらない限り再同期しない）。
+            # 変更しないため、そのページを選択したまま維持される。
             st.session_state.carousel_page_ids = new_order
             page_ids = new_order
 
@@ -1232,26 +1209,18 @@ elif result and result["mode"] == MODE_CAROUSEL:
         st.session_state.carousel_selected_id = page_ids[0]
     selected_id = st.session_state.carousel_selected_id
 
-    # --- 共有テキスト編集欄（carousel_active_editor）とcarousel_storeの同期 ---
-    # 編集欄はページごとに別ウィジェットにせず、1つのウィジェットを使い回している。
-    # 選択中ページが切り替わったとき（または直前にUndo/Redoで復元が行われたとき）は、
-    # 編集欄の表示内容を保存領域（carousel_store）の値へ差し替える。
-    # 切り替わっていない間は、編集欄の「今の値」こそが最新の編集内容なので上書きしない。
-    force_resync = st.session_state.pop("carousel_force_editor_resync", False)
-    if selected_id is not None and (
-        force_resync or st.session_state.get("carousel_editor_owner_id") != selected_id
-    ):
-        st.session_state.carousel_active_editor = st.session_state.carousel_store.get(
-            selected_id, ""
-        )
-        st.session_state.carousel_editor_owner_id = selected_id
-
-    # 編集欄の最新の内容を、選択中ページの保存領域へ書き戻す。
-    # 以降のサムネイル生成・Undo履歴の判定は、すべてこの保存領域を参照する。
+    # --- 編集欄の内容をcarousel_storeへ反映 ---
+    # 編集欄はページごとに別のkeyで、選択中の1ページぶんだけをこのブロックの
+    # 最後で描画している。その最新の編集内容をここで先に読み取り、保存領域へ
+    # 書き戻す。以降のサムネイル生成・Undo履歴の判定は、すべてこの保存領域を
+    # 参照する。Undo/Redoの直後に残っている古い編集内容は、carousel_doc_revが
+    # 違うことで捨てられる。
     if selected_id is not None:
-        st.session_state.carousel_store[selected_id] = st.session_state.get(
-            "carousel_active_editor", ""
+        edited_doc = editor_value(
+            f"carousel_editor_{selected_id}", st.session_state.carousel_doc_rev
         )
+        if edited_doc is not None:
+            st.session_state.carousel_store[selected_id] = edited_doc
 
     # ここまでの内容（テキスト編集・デザイン変更）を反映したうえで、
     # 今回の実行で確定した状態を履歴に記録する。
@@ -1313,13 +1282,8 @@ elif result and result["mode"] == MODE_CAROUSEL:
             insert_at = len(ids)
         ids.insert(insert_at, new_id)
         st.session_state.carousel_page_ids = ids
-        st.session_state.carousel_store[new_id] = ""
+        st.session_state.carousel_store[new_id] = text_to_doc("")
         st.session_state.carousel_selected_id = new_id
-        # このボタンの処理はcarousel_active_editor（共有テキスト編集欄）を
-        # 描画するより前でst.rerun()するため、Streamlitが「今回は描画されな
-        # かったウィジェット」としてその状態を破棄してしまうことがある。
-        # 次の描画で必ずcarousel_storeから読み直させることで、これを防ぐ。
-        st.session_state.carousel_force_editor_resync = True
         st.rerun()
 
     if delete_page_clicked and can_delete_page:
@@ -1331,7 +1295,6 @@ elif result and result["mode"] == MODE_CAROUSEL:
         # 可能なら直前のページ、それが無ければ（先頭を削除した場合）次のページを選択する。
         new_selected_index = deleted_index - 1 if deleted_index > 0 else 0
         st.session_state.carousel_selected_id = ids[new_selected_index]
-        st.session_state.carousel_force_editor_resync = True
         st.rerun()
 
     if undo_clicked and can_undo:
@@ -1350,9 +1313,6 @@ elif result and result["mode"] == MODE_CAROUSEL:
         ids[idx - 1], ids[idx] = ids[idx], ids[idx - 1]
         st.session_state.carousel_page_ids = ids
         # 選択中ページ自体（ID）は変えず、表示位置だけが1つ前へ動く。
-        # carousel_active_editorを描画する前でrerunするため、次の描画で
-        # 必ず（選択中ページ自身の）本文をcarousel_storeから読み直させる。
-        st.session_state.carousel_force_editor_resync = True
         st.rerun()
 
     if move_next_clicked and can_move_next:
@@ -1360,7 +1320,6 @@ elif result and result["mode"] == MODE_CAROUSEL:
         idx = ids.index(selected_id)
         ids[idx + 1], ids[idx] = ids[idx], ids[idx + 1]
         st.session_state.carousel_page_ids = ids
-        st.session_state.carousel_force_editor_resync = True
         st.rerun()
 
     # --- 「カルーセルデザイン」ウィジェットの描画 ---
@@ -1452,13 +1411,13 @@ elif result and result["mode"] == MODE_CAROUSEL:
 
     carousel_bg_cache_key = _background_cache_key(carousel_bg_file_bytes)
 
-    def _generate_carousel_preview(page_text):
+    def _generate_carousel_preview(page_doc):
         # 本文・背景・デザイン設定のいずれも変わっていないページは、
         # _cached_carousel_page_image()がキャッシュ済みの画像をそのまま
         # 返す（ページ選択・他ページの編集・並び替え・前後移動・削除の
         # いずれでも、影響を受けないページの画像は再生成されない）。
         return _cached_carousel_page_image(
-            page_text,
+            _doc_key(page_doc),
             bg_cache_key=carousel_bg_cache_key,
             text_color=carousel_text_color,
             text_bg_color=carousel_text_bg_color,
@@ -1476,7 +1435,7 @@ elif result and result["mode"] == MODE_CAROUSEL:
     if not page_ids:
         st.info("ページがありません。「ページを追加」から作成してください。")
     else:
-        page_texts = {pid: st.session_state.carousel_store.get(pid, "") for pid in page_ids}
+        page_docs = {pid: st.session_state.carousel_store.get(pid, []) for pid in page_ids}
         selected_index = page_ids.index(selected_id)
 
         # --- メインプレビュー（横一列・全ページ表示） ---
@@ -1496,7 +1455,7 @@ elif result and result["mode"] == MODE_CAROUSEL:
                     page_warning = None
                     try:
                         page_image_bytes, page_warning = _generate_carousel_preview(
-                            page_texts.get(pid, "")
+                            page_docs.get(pid, [])
                         )
                     except StoryImageError as e:
                         if is_selected:
@@ -1548,15 +1507,20 @@ elif result and result["mode"] == MODE_CAROUSEL:
                         page_png, key=f"carousel_{page_number}", caption=f"ページ {page_number}"
                     )
 
-        # 全ページ共通で1つだけ使い回す編集欄。keyは選択中ページIDではなく
-        # 固定文字列にし、実際の本文はcarousel_storeとの同期処理（このブロックの
-        # 冒頭）で切り替える。ページごとに異なるkeyを使うと、選択が外れた
-        # ページのウィジェットとしてStreamlitに扱われ、値が破棄されてしまうため。
-        st.text_area(
-            "本文",
-            key="carousel_active_editor",
-            height=220,
-            label_visibility="collapsed",
+        # 選択中ページの文章の編集欄。文字はそのまま入力・削除でき、寄せは行ごと、
+        # 文字サイズは選択した文字に適用される。keyをページごとに分けているので、
+        # 別のページを選ぶとそのページの内容で編集欄が作り直される。
+        # 編集内容は、次の再実行の冒頭（このブロックの上の方）でcarousel_storeへ
+        # 反映している。
+        st.caption(
+            "文字はそのまま入力・削除できます。寄せは行ごと、"
+            "文字サイズは選択した文字に適用されます。"
+        )
+        rich_editor(
+            page_docs.get(selected_id, []),
+            rev=st.session_state.carousel_doc_rev,
+            base_size=carousel_font_size,
+            key=f"carousel_editor_{selected_id}",
         )
 
 elif result and result["mode"] == MODE_NOTE:
