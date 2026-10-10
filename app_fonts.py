@@ -30,23 +30,22 @@ FONTS_DIR = os.path.join(os.path.dirname(__file__), "fonts")
 # （Python 3.7+ の dict は挿入順を保持するため）。
 FONT_FILES = {
     "游明朝体": "BIZUDPMincho-Regular.ttf",  # BIZ UDPMincho（明朝/Serif系の代替）
-    "ゴシック": "ipaexg.ttf",  # IPAexゴシック（既存フォント。表示名のみ変更）
-    "Arial": "Arimo-Regular.ttf",  # Arimo（Arial互換のSans。日本語グリフなし）
-    # ここから下は追加フォント（すべて日本語対応・SIL OFL）。
-    "太ゴシック": "ZenKakuGothicNew-Bold.ttf",  # Zen Kaku Gothic New Bold
-    "丸ゴシック": "ZenMaruGothic-Regular.ttf",  # Zen Maru Gothic
-    "太丸ゴシック": "MPLUSRounded1c-Bold.ttf",  # M PLUS Rounded 1c Bold
-    "オールド明朝": "ZenOldMincho-Regular.ttf",  # Zen Old Mincho
-    "太明朝": "ZenOldMincho-Bold.ttf",  # Zen Old Mincho Bold
-    "装飾明朝": "KaiseiDecol-Regular.ttf",  # Kaisei Decol
     "しっぽり明朝": "ShipporiMincho-Regular.ttf",  # Shippori Mincho
+    "オールド明朝": "ZenOldMincho-Regular.ttf",  # Zen Old Mincho
+    "Arial": "Arimo-Regular.ttf",  # Arimo（Arial互換のSans。日本語グリフなし）
+    "太明朝": "ZenOldMincho-Bold.ttf",  # Zen Old Mincho Bold
     "さわらび明朝": "SawarabiMincho-Regular.ttf",  # Sawarabi Mincho
     "ひな明朝": "HinaMincho-Regular.ttf",  # Hina Mincho
     "アンティーク明朝": "ZenAntique-Regular.ttf",  # Zen Antique
-    "モダン明朝": "KaiseiOpti-Regular.ttf",  # Kaisei Opti
-    "見出し明朝": "KaiseiTokumin-Bold.ttf",  # Kaisei Tokumin Bold
+    "ゴシック": "ipaexg.ttf",  # IPAexゴシック（既存フォント。表示名のみ変更）
+    "太ゴシック": "ZenKakuGothicNew-Bold.ttf",  # Zen Kaku Gothic New Bold
+    "丸ゴシック": "ZenMaruGothic-Regular.ttf",  # Zen Maru Gothic
+    "太丸ゴシック": "MPLUSRounded1c-Bold.ttf",  # M PLUS Rounded 1c Bold
     "ペン字風": "ZenKurenaido-Regular.ttf",  # Zen Kurenaido
     "手書き風書体": "Yomogi-Regular.ttf",  # Yomogi（手書き風の代替）
+    "見出し明朝": "KaiseiTokumin-Bold.ttf",  # Kaisei Tokumin Bold
+    "装飾明朝": "KaiseiDecol-Regular.ttf",  # Kaisei Decol
+    "モダン明朝": "KaiseiOpti-Regular.ttf",  # Kaisei Opti
 }
 
 # 選択肢の表示順（Streamlitのselectboxにそのまま渡す）。
