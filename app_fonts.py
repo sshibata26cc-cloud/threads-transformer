@@ -29,9 +29,9 @@ FONTS_DIR = os.path.join(os.path.dirname(__file__), "fonts")
 # 辞書の並び順がそのままUIの選択肢の並び順になる
 # （Python 3.7+ の dict は挿入順を保持するため）。
 FONT_FILES = {
+    "オールド明朝": "ZenOldMincho-Regular.ttf",  # Zen Old Mincho
     "游明朝体": "BIZUDPMincho-Regular.ttf",  # BIZ UDPMincho（明朝/Serif系の代替）
     "しっぽり明朝": "ShipporiMincho-Regular.ttf",  # Shippori Mincho
-    "オールド明朝": "ZenOldMincho-Regular.ttf",  # Zen Old Mincho
     "Arial": "Arimo-Regular.ttf",  # Arimo（Arial互換のSans。日本語グリフなし）
     "太明朝": "ZenOldMincho-Bold.ttf",  # Zen Old Mincho Bold
     "さわらび明朝": "SawarabiMincho-Regular.ttf",  # Sawarabi Mincho
@@ -51,7 +51,7 @@ FONT_FILES = {
 # 選択肢の表示順（Streamlitのselectboxにそのまま渡す）。
 FONT_OPTIONS = list(FONT_FILES.keys())
 
-DEFAULT_FONT_KEY = "游明朝体"
+DEFAULT_FONT_KEY = "オールド明朝"
 
 # 「Arial」（Arimo）は日本語グリフを持たないため、本文に日本語が含まれる
 # 場合はこちらへ自動的に差し替える（豆腐文字「□」を防ぐため）。
