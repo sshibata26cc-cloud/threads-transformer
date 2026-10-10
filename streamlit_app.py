@@ -74,6 +74,9 @@ MODE_NOTE = "note 投稿用"
 TEXT_BG_MODE_NONE = "透明"
 TEXT_BG_MODE_COLOR = "色を設定"
 
+# 「背景の暗さ」の初期値（%）。ストーリーズ・カルーセル共通。
+DEFAULT_OVERLAY_PERCENT = 65
+
 # 完成画像（右クリック / 長押しで保存する用）の表示。
 SAVE_IMAGE_HINT = "画像を右クリック（スマホは長押し）すると、そのまま画像として保存できます。"
 SAVE_IMAGE_WIDTH = 320
@@ -312,7 +315,7 @@ def _default_carousel_design():
         "font_choice": DEFAULT_FONT_KEY,
         "font_size": DEFAULT_MAX_FONT_SIZE,
         "text_color": DEFAULT_TEXT_COLOR,
-        "overlay_percent": 20,
+        "overlay_percent": DEFAULT_OVERLAY_PERCENT,
         "text_bg_mode": TEXT_BG_MODE_NONE,
         "text_bg_color": DEFAULT_TEXT_BG_COLOR,
     }
@@ -659,7 +662,7 @@ if result and result["mode"] == MODE_INSTAGRAM:
             "背景の暗さ",
             min_value=0,
             max_value=80,
-            value=20,
+            value=DEFAULT_OVERLAY_PERCENT,
             step=5,
             format="%d%%",
             key=f"story_overlay_{reset_id}",
@@ -1377,7 +1380,7 @@ elif result and result["mode"] == MODE_CAROUSEL:
 
         overlay_key = f"carousel_overlay_{reset_id}"
         if overlay_key not in st.session_state:
-            st.session_state[overlay_key] = 20
+            st.session_state[overlay_key] = DEFAULT_OVERLAY_PERCENT
         carousel_overlay_percent = st.slider(
             "背景の暗さ",
             min_value=0,
