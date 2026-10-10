@@ -105,7 +105,7 @@ def _show_saveable_image(png_bytes, key, caption=None):
 # ストーリーズ背景の差し込み方（表示名 -> story_imageの定数）。先頭がデフォルト。
 BG_FIT_CHOICES = {"横いっぱい": BG_FIT_WIDTH, "縦いっぱい": BG_FIT_HEIGHT}
 
-ACCOUNT_CHOICES = ["shin.coaching", "takuma_o369", "masa_life128"]
+ACCOUNT_CHOICES = ["takuma_o369", "shin.coaching", "masa_life128"]
 
 # カルーセルのUndo/Redo履歴として保持する最大件数。
 # これを超えたら、最も古い履歴から削除する。
