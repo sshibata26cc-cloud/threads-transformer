@@ -9,10 +9,14 @@ Threadsの投稿内容から、Instagramストーリーズ用のPNG画像を生�
 呼び出し側（Streamlit画面）からユーザーが指定できる。
 
 背景は「横いっぱい」「縦いっぱい」のどちらかで差し込み、位置（オフセット）も
-指定できる。文字だけを描いた透明レイヤー（render_story_text_layer）と背景の
-配置計算（compute_background_placement）を分けてあるので、ブラウザ上の
-プレビュー・PNG書き出し・動画書き出し（story_video.py）のすべてが
-同じ計算結果を使う。
+指定できる。文字だけを描いた透明レイヤーと背景の配置計算
+（compute_background_placement）を分けてあるので、ブラウザ上の編集画面・
+PNG書き出し・動画書き出し（story_video.py）のすべてが同じ計算結果を使う。
+
+文字レイヤーは通常、ブラウザ上の編集画面が組んだ配置どおりに描いたもの
+（rich_text.render_lines_layer）を使う。その配置がまだ無いとき（表示直後・
+設定を変えた直後）だけ、ここのrender_story_text_layerでPython側が組んだ
+ものを代わりに使う。
 
 フォントの選択肢・同梱フォントファイル・ライセンスについては
 app_fonts.py と fonts/FONTS_NOTICE.txt を参照。
@@ -40,6 +44,16 @@ BG_FILL_BLUR = 10  # 縮小後の画像に対するぼかしの強さ（px）
 MARGIN_X = 72
 MARGIN_TOP = 90
 MARGIN_BOTTOM = 90
+
+# プレビュー上の編集画面（page_editor.py）へ渡す、画像の大きさ・余白・地の色。
+STORY_CANVAS = {
+    "w": CANVAS_WIDTH,
+    "h": CANVAS_HEIGHT,
+    "mx": MARGIN_X,
+    "mt": MARGIN_TOP,
+    "mb": MARGIN_BOTTOM,
+    "color": "#%02X%02X%02X" % LETTERBOX_COLOR,
+}
 
 # 背景の差し込み方。
 BG_FIT_WIDTH = "width"  # 横いっぱい（背景の横幅をキャンバスの横幅に合わせる）
@@ -125,7 +139,7 @@ def compute_background_placement(
     状態からのずれ」で、背景がキャンバスの外へ出ていかない範囲
     （はみ出している軸ははみ出しぶん、足りない軸は余白ぶん）に丸める。
 
-    プレビュー用コンポーネント（story_preview_component/index.html）も
+    編集画面のコンポーネント（page_editor_component/index.html）も
     これと同じ式で配置しているため、変更する場合は両方を揃えること。
     """
     if fit_mode == BG_FIT_HEIGHT:
@@ -217,50 +231,31 @@ def image_to_png_bytes(image: Image.Image) -> bytes:
 
 
 def generate_story_image(
-    doc,
+    text_layer,
     background_image=None,
-    text_color=STORY_DEFAULT_TEXT_COLOR,
-    text_bg_color=None,
-    max_font_size=DEFAULT_MAX_FONT_SIZE,
     overlay_opacity=0.0,
-    font_key=DEFAULT_FONT_KEY,
     bg_fit=DEFAULT_BG_FIT,
     bg_offset=(0, 0),
 ):
     """
-    ストーリーズ1ページぶんの文書から、1080x1920のPNG画像を生成する。
+    ストーリーズ1ページぶんの、1080x1920のPNG画像（バイト列）を生成する。
 
     引数:
-        doc: 1ページぶんの文書（rich_text.pyの形式）。
+        text_layer: 文字だけを描いた1080x1920の透明なRGBA画像。
         background_image: load_background_image()で読み込み済みのRGB画像、
                            またはNone（Noneの場合は黒地を使用）。
-        text_color: 本文の文字色（"#RRGGBB"形式）。
-        text_bg_color: 文字の背景色（"#RRGGBB"形式）。
-                       None（既定値）の場合は文字背景を描画しない。
-        max_font_size: 標準の文字サイズ（部分的にサイズを指定していない文字に使う）。
         overlay_opacity: 背景（余白のぼかし背景を含む）に重ねる黒の不透明度（0.0〜0.8）。
                          background_imageがNoneの場合は無視される。
-        font_key: app_fonts.FONT_OPTIONSのいずれか。
         bg_fit: BG_FIT_WIDTH（横いっぱい）または BG_FIT_HEIGHT（縦いっぱい）。
         bg_offset: 背景を中央からずらす量 (x, y)（キャンバスのpx）。
-
-    戻り値: (PNGのバイト列, 警告メッセージ または None)
     """
     canvas = Image.new("RGB", (CANVAS_WIDTH, CANVAS_HEIGHT), LETTERBOX_COLOR)
 
     if background_image is not None:
         canvas = _paste_background(canvas, background_image, bg_fit, bg_offset, overlay_opacity)
 
-    text_layer, warning = render_story_text_layer(
-        doc,
-        text_color=text_color,
-        text_bg_color=text_bg_color,
-        max_font_size=max_font_size,
-        font_key=font_key,
-    )
     canvas.paste(text_layer, (0, 0), mask=text_layer)
-
-    return image_to_png_bytes(canvas), warning
+    return image_to_png_bytes(canvas)
 
 
 DEFAULT_JPEG_QUALITY = 95

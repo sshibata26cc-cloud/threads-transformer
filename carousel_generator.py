@@ -32,42 +32,32 @@ CAROUSEL_MARGIN_X = MARGIN_X
 CAROUSEL_MARGIN_Y = 100
 
 
-def generate_carousel_page_image(
+# プレビュー上の編集画面（page_editor.py）へ渡す、画像の大きさ・余白・地の色。
+CAROUSEL_CANVAS = {
+    "w": CAROUSEL_WIDTH,
+    "h": CAROUSEL_HEIGHT,
+    "mx": CAROUSEL_MARGIN_X,
+    "mt": CAROUSEL_MARGIN_Y,
+    "mb": CAROUSEL_MARGIN_Y,
+    "color": "#%02X%02X%02X" % BACKGROUND_COLOR,
+}
+
+
+def render_carousel_text_layer(
     doc,
-    background_image=None,
     text_color=DEFAULT_TEXT_COLOR,
     text_bg_color=None,
     max_font_size=DEFAULT_MAX_FONT_SIZE,
-    overlay_opacity=0.0,
     font_key=DEFAULT_FONT_KEY,
 ):
     """
-    カルーセルの1ページ分（1080x1350）のPNG画像を生成する。
+    カルーセル1ページぶんの文書（rich_text.pyの形式）の文字だけを、Python側で
+    組んで描いた1080x1350の透明なRGBA画像を返す。ブラウザ上の編集画面が組んだ
+    配置がまだ無いときの代わりに使う。
 
-    引数:
-        doc: 1ページぶんの文書（rich_text.pyの形式）。
-        background_image: load_background_image()で読み込み済みのRGB画像、
-                           またはNone（Noneの場合は白背景を使用）。
-        text_color: 文字色（"#RRGGBB"形式）。
-        text_bg_color: 文字の背景色（"#RRGGBB"形式）。
-                       None（既定値）の場合は文字背景を描画しない（透明）。
-        max_font_size: 標準の文字サイズ（部分的にサイズを指定していない文字に使う）。
-        overlay_opacity: 背景画像の上に重ねる黒レイヤーの不透明度（0.0〜0.8）。
-                         background_imageがNoneの場合は無視される。
-        font_key: app_fonts.FONT_OPTIONSのいずれか（全ページ共通の1つを想定）。
-
-    戻り値: (PNGのバイト列, 警告メッセージ または None)
+    戻り値: (RGBA画像, 警告メッセージ または None)
     """
-    canvas = Image.new("RGB", (CAROUSEL_WIDTH, CAROUSEL_HEIGHT), BACKGROUND_COLOR)
-
-    if background_image is not None:
-        canvas.paste(_cover_resize(background_image, CAROUSEL_WIDTH, CAROUSEL_HEIGHT), (0, 0))
-
-        opacity = max(0.0, min(overlay_opacity or 0.0, MAX_OVERLAY_OPACITY))
-        if opacity > 0:
-            canvas = Image.blend(canvas, Image.new("RGB", canvas.size, (0, 0, 0)), opacity)
-
-    text_layer, warning = render_rich_text_layer(
+    return render_rich_text_layer(
         doc,
         (CAROUSEL_WIDTH, CAROUSEL_HEIGHT),
         CAROUSEL_MARGIN_X,
@@ -79,6 +69,27 @@ def generate_carousel_page_image(
         font_key=font_key,
         overflow_hint="ページを分けるか、文章を短くしてください。",
     )
-    canvas.paste(text_layer, (0, 0), mask=text_layer)
 
-    return image_to_png_bytes(canvas), warning
+
+def generate_carousel_page_image(text_layer, background_image=None, overlay_opacity=0.0):
+    """
+    カルーセルの1ページ分（1080x1350）のPNG画像（バイト列）を生成する。
+
+    引数:
+        text_layer: 文字だけを描いた1080x1350の透明なRGBA画像。
+        background_image: load_background_image()で読み込み済みのRGB画像、
+                           またはNone（Noneの場合は白背景を使用）。
+        overlay_opacity: 背景画像の上に重ねる黒レイヤーの不透明度（0.0〜0.8）。
+                         background_imageがNoneの場合は無視される。
+    """
+    canvas = Image.new("RGB", (CAROUSEL_WIDTH, CAROUSEL_HEIGHT), BACKGROUND_COLOR)
+
+    if background_image is not None:
+        canvas.paste(_cover_resize(background_image, CAROUSEL_WIDTH, CAROUSEL_HEIGHT), (0, 0))
+
+        opacity = max(0.0, min(overlay_opacity or 0.0, MAX_OVERLAY_OPACITY))
+        if opacity > 0:
+            canvas = Image.blend(canvas, Image.new("RGB", canvas.size, (0, 0, 0)), opacity)
+
+    canvas.paste(text_layer, (0, 0), mask=text_layer)
+    return image_to_png_bytes(canvas)

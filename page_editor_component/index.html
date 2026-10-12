@@ -1,0 +1,728 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; }
+  body { font-family: "Hiragino Sans", "Yu Gothic", "Noto Sans JP", sans-serif; color: #3B2E27; }
+
+  #bar {
+    display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; justify-content: center;
+    padding: 8px; margin: 0 auto 8px; max-width: 460px; box-sizing: border-box;
+    background: #FBF6EC; border: 1px solid #D9CBB8; border-radius: 10px;
+  }
+  .grp { display: flex; gap: 4px; align-items: center; }
+  .lbl { font-size: 12px; color: #6B5A4E; margin-right: 2px; }
+  button {
+    font: inherit; font-size: 13px; color: #3B2E27; background: #fff; border: 1px solid #C9B8A4;
+    border-radius: 7px; padding: 6px 9px; cursor: pointer; white-space: nowrap;
+    -webkit-tap-highlight-color: transparent;
+  }
+  button:active { background: #F0E4D2; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  button.on { background: #A9673F; border-color: #A9673F; color: #fff; }
+
+  /* 画像と同じ縦横比の枠。中の#canvasは画像と同じ大きさ（1080px幅など）で組み、
+     枠の幅に合わせて縮小表示する。 */
+  #stage {
+    position: relative; overflow: hidden; margin: 0 auto;
+    width: 100%; max-width: 460px;
+    border-radius: 10px; box-shadow: 0 1px 6px rgba(59, 46, 39, 0.25);
+  }
+  #fill, #shade { position: absolute; inset: 0; width: 100%; height: 100%; display: none; pointer-events: none; }
+  #shade { background: #000; opacity: 0; }
+  #bg { position: absolute; display: none; pointer-events: none; }
+  #bg img { display: block; width: 100%; height: 100%; }
+  #fill, #bg img { -webkit-user-drag: none; user-select: none; -webkit-user-select: none; }
+  #canvas { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+  #bands { position: absolute; inset: 0; pointer-events: none; }
+  #bands div { position: absolute; }
+  .page { position: absolute; display: flex; flex-direction: column; visibility: hidden; pointer-events: none; }
+  .page.current { visibility: visible; pointer-events: auto; }
+  /* 上下のmargin:autoで、収まるときは上下中央、あふれるときは上端から並べる。 */
+  .ed {
+    margin: auto 0; width: 100%; outline: none; cursor: text;
+    line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere;
+    font-kerning: none; font-variant-ligatures: none; letter-spacing: 0;
+    -webkit-user-select: text; user-select: text;
+  }
+  #dragcover {
+    position: absolute; inset: 0; display: none; cursor: grab; touch-action: none;
+    box-shadow: inset 0 0 0 3px #FF7A1A; border-radius: 10px;
+  }
+  #dragcover.dragging { cursor: grabbing; }
+
+  .row {
+    display: none; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap;
+    padding: 8px 4px 0; font-size: 13px; line-height: 1.5; text-align: center;
+  }
+  #pager span { min-width: 5.5em; font-weight: 600; }
+  #note { display: flex; min-height: 1.5em; font-size: 12.5px; color: #6B5A4E; }
+  #cal { position: absolute; left: -99999px; top: 0; visibility: hidden; white-space: nowrap; line-height: normal; }
+  #cal i { display: inline-block; width: 0; height: 0; vertical-align: baseline; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <div class="grp">
+    <button type="button" data-cmd="left">左寄せ</button>
+    <button type="button" data-cmd="center">中央</button>
+    <button type="button" data-cmd="right">右寄せ</button>
+  </div>
+  <div class="grp">
+    <span class="lbl">文字</span>
+    <button type="button" data-cmd="smaller">小さく</button>
+    <button type="button" data-cmd="larger">大きく</button>
+    <button type="button" data-cmd="normal">標準</button>
+  </div>
+  <div class="grp" id="pagegrp">
+    <button type="button" data-cmd="pagebreak">改ページ</button>
+    <button type="button" data-cmd="merge" id="merge">前のページと結合</button>
+  </div>
+  <div class="grp" id="bggrp">
+    <button type="button" data-cmd="movebg" id="movebg">背景を動かす</button>
+    <button type="button" data-cmd="resetbg" id="resetbg">位置をリセット</button>
+  </div>
+</div>
+<div id="stage">
+  <img id="fill" alt="">
+  <div id="bg"><img id="bgimg" alt=""></div>
+  <div id="shade"></div>
+  <div id="canvas"><div id="bands"></div></div>
+  <div id="dragcover"></div>
+</div>
+<div class="row" id="pager">
+  <button id="prev" type="button">‹ 前へ</button>
+  <span id="pagelabel"></span>
+  <button id="next" type="button">次へ ›</button>
+</div>
+<div class="row" id="note"></div>
+<div id="cal"><span></span><i></i></div>
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var stage = $("stage"), canvas = $("canvas"), bands = $("bands");
+  var bg = $("bg"), bgimg = $("bgimg"), fill = $("fill"), shade = $("shade"), dragcover = $("dragcover");
+
+  var SIZE_STEP = 4, MIN_SIZE = 12, MAX_SIZE = 160;  // rich_text.pyのMIN/MAX_RUN_SIZEと揃える
+  var MIN_BASE = 20, SHRINK_STEP = 2;                // rich_text.pyのMIN_BODY_FONT_SIZE / FONT_STEPと揃える
+  var BAND_PAD_X = 0.30, BAND_PAD_Y = 0.12, BAND_RADIUS = 0.22;  // 同じくTEXT_BG_*_RATIO
+  var COMMIT_DELAY = 500;  // 入力が止まってからPython側へ送るまでの時間（ms）
+  // app_fonts.pyの_JAPANESE_CHAR_REと同じ範囲（"Arial"で日本語を含むページの判定用）。
+  var JAPANESE = /[　-〿぀-ゟ゠-ヿ㐀-䶿一-鿿＀-￯]/;
+
+  var args = null;
+  var rev = null;          // Python側が文書を作り直した回数。変わったら全ページを作り直す
+  var pages = [];          // {id, el, ed, k, lines, overflow, fallback}
+  var current = null;      // 表示・編集中のページ
+  var scale = 1;           // 表示倍率（枠の幅 ÷ 画像の幅）
+  var fontKey = null;      // 読み込み済み（または読み込み中）のフォントの識別子
+  var fontReady = false;
+  var layoutKey = null;    // 直近に全ページを組み直したときのstyle.key
+  var bgToken = null, offset = { x: 0, y: 0 }, drag = null, moveMode = false;
+  var savedRange = null, timer = null, lastSent = null, noteText = "";
+  var metricsCache = {};
+
+  function send(type, data) {
+    window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data || {}), "*");
+  }
+  function resize() {
+    send("streamlit:setFrameHeight", { height: Math.ceil(document.body.getBoundingClientRect().height) + 2 });
+  }
+  function say(text) { noteText = text; refreshNote(); }
+  function refreshNote() {
+    var text = noteText;
+    if (!text && !fontReady) text = "フォントを読み込んでいます…";
+    if (!text && current && current.overflow) text = "文章が画像に収まりきっていません。文章を減らすか、ページを分けてください。";
+    $("note").textContent = text;
+  }
+
+  // ---------------- 文書 ⇔ 画面 ----------------
+  function makeParagraph(item) {
+    var p = document.createElement("div");
+    if (item && item.align && item.align !== "left") p.style.textAlign = item.align;
+    var runs = (item && item.runs) || [];
+    for (var i = 0; i < runs.length; i++) {
+      if (runs[i].s) {
+        var span = document.createElement("span");
+        span.setAttribute("data-s", runs[i].s);
+        span.textContent = runs[i].t;
+        p.appendChild(span);
+      } else {
+        p.appendChild(document.createTextNode(runs[i].t));
+      }
+    }
+    if (!p.textContent) p.appendChild(document.createElement("br"));
+    return p;
+  }
+  function ensureBlock(ed) { if (!ed.firstChild) ed.appendChild(makeParagraph(null)); }
+  function newId() { return "p" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+  function makePage(id, doc) {
+    var el = document.createElement("div");
+    el.className = "page";
+    var ed = document.createElement("div");
+    ed.className = "ed";
+    ed.contentEditable = "true";
+    ed.spellcheck = false;
+    for (var i = 0; i < (doc || []).length; i++) if (!doc[i].pb) ed.appendChild(makeParagraph(doc[i]));
+    ensureBlock(ed);
+    el.appendChild(ed);
+    canvas.appendChild(el);
+    var page = { id: id, el: el, ed: ed, k: 1, lines: [], overflow: false, fallback: false };
+    ed.addEventListener("input", function () { onInput(page); });
+    ed.addEventListener("blur", function () { if (timer) flush(); });
+    // 貼り付けは書式を持ち込まず、文字だけを入れる。
+    ed.addEventListener("paste", function (e) {
+      e.preventDefault();
+      var text = (e.clipboardData || window.clipboardData).getData("text/plain");
+      document.execCommand("insertText", false, text.replace(/\r\n?/g, "\n"));
+    });
+    return page;
+  }
+
+  function isBlock(el) { return /^(DIV|P|LI|UL|OL|H[1-6]|BLOCKQUOTE|PRE)$/.test(el.tagName); }
+  function alignOf(el) {
+    var a = getComputedStyle(el).textAlign || "";
+    if (a.indexOf("center") >= 0) return "center";
+    if (a.indexOf("right") >= 0 || a === "end") return "right";
+    return "left";
+  }
+  function sizeOf(node, ed) {
+    var el = (node.nodeType === 1 ? node : node.parentElement);
+    el = el && el.closest("[data-s]");
+    if (!el || !ed.contains(el)) return null;
+    return parseInt(el.getAttribute("data-s"), 10) || null;
+  }
+  // 編集欄の中身を文書（rich_text.pyの形式）に読み取る。
+  function serialize(ed) {
+    var out = [], cur = null, pending = false;
+    function open(blockEl) { cur = { align: alignOf(blockEl), runs: [] }; out.push(cur); pending = false; }
+    function addText(text, size) {
+      text = text.replace(/ /g, " ").replace(/[​\r\n]/g, "");
+      if (!text) return;
+      var last = cur.runs[cur.runs.length - 1];
+      if (last && last.s === size) last.t += text; else cur.runs.push({ t: text, s: size });
+    }
+    function walk(parent, blockEl) {
+      for (var ch = parent.firstChild; ch; ch = ch.nextSibling) {
+        if (ch.nodeType === 3) {
+          if (!cur || pending) open(blockEl);
+          addText(ch.nodeValue, sizeOf(ch, ed));
+        } else if (ch.nodeType !== 1) {
+          continue;
+        } else if (ch.tagName === "BR") {
+          // 行の途中の改行（Shift+Enter）は段落の区切りとして扱う。
+          // ブロック末尾の<br>は空行を表示するための詰め物なので無視する。
+          if (!cur || pending) open(blockEl);
+          pending = true;
+        } else if (isBlock(ch)) {
+          open(ch); walk(ch, ch); cur = null; pending = false;
+        } else {
+          walk(ch, blockEl);
+        }
+      }
+    }
+    walk(ed, ed);
+    return out;
+  }
+
+  // ---------------- 組版（文字サイズ・自動縮小・配置の計測） ----------------
+  function style() { return args.style; }
+  function applySizes(page) {
+    var base = Math.round(style().base * page.k);
+    page.ed.style.fontSize = base + "px";
+    var spans = page.ed.querySelectorAll("[data-s]");
+    for (var i = 0; i < spans.length; i++) {
+      var s = parseInt(spans[i].getAttribute("data-s"), 10);
+      spans[i].style.fontSize = (s ? Math.max(1, Math.round(s * page.k)) : base) + "px";
+    }
+  }
+  // 全体が上下の余白の内側に収まるまで、すべての文字サイズを同じ比率で縮める。
+  function fit(page) {
+    var c = args.canvas, avail = c.h - c.mt - c.mb, base = style().base;
+    // "Arial"は日本語の字形を持たないので、日本語を含むページは代替フォントで組む。
+    page.fallback = !!(style().fallback && JAPANESE.test(page.ed.textContent));
+    page.family = page.fallback ? style().fallback.name : style().font.name;
+    page.ed.style.fontFamily = '"' + page.family + '", sans-serif';
+    var size = base;
+    page.k = 1;
+    applySizes(page);
+    while (page.ed.offsetHeight > avail && size > MIN_BASE) {
+      size = Math.max(MIN_BASE, size - SHRINK_STEP);
+      page.k = size / base;
+      applySizes(page);
+    }
+    page.overflow = page.ed.offsetHeight > avail;
+  }
+  // そのフォント・サイズで、文字の枠の上端からベースラインまで（asc）と
+  // ベースラインから下端まで（desc）の距離を、実際に組んで測る。
+  function metrics(family, size) {
+    var key = family + "/" + size;
+    if (metricsCache[key]) return metricsCache[key];
+    var cal = $("cal"), span = cal.firstChild, probe = cal.lastChild;
+    cal.style.fontFamily = '"' + family + '", sans-serif';
+    cal.style.fontSize = size + "px";
+    span.textContent = "あ";
+    var range = document.createRange();
+    range.selectNodeContents(span);
+    var box = range.getBoundingClientRect(), baseline = probe.getBoundingClientRect().bottom;
+    return (metricsCache[key] = { asc: baseline - box.top, desc: box.bottom - baseline });
+  }
+  // 画面に組まれた結果から、行ごとのベースラインと1文字ごとのx座標を読み取る。
+  // Python側はこの配置どおりに文字を描くので、完成画像が編集中の見た目と一致する。
+  function measure(page) {
+    var origin = canvas.getBoundingClientRect();
+    var lines = [], line = null;
+    var walker = document.createTreeWalker(page.ed, NodeFilter.SHOW_TEXT);
+    var range = document.createRange(), node;
+    while ((node = walker.nextNode())) {
+      var text = node.nodeValue;
+      if (!text) continue;
+      var size = parseFloat(getComputedStyle(node.parentElement).fontSize);
+      var m = metrics(page.family, size);
+      for (var i = 0; i < text.length;) {
+        var len = text.codePointAt(i) > 0xffff ? 2 : 1;
+        var ch = text.substr(i, len);
+        range.setStart(node, i);
+        range.setEnd(node, i + len);
+        i += len;
+        var rects = range.getClientRects(), r = null;
+        for (var j = 0; j < rects.length; j++) if (!r || rects[j].width > r.width) r = rects[j];
+        if (!r) continue;
+        if (r.width === 0) {
+          // 幅のない文字（濁点などの結合文字）は、直前の文字と一緒に描く。
+          if (line && line.g.length && !/\s/.test(ch)) line.g[line.g.length - 1][1] += ch;
+          continue;
+        }
+        if (/\s/.test(ch)) continue;  // 空白は描かない
+        var x = (r.left - origin.left) / scale;
+        var y = (r.top - origin.top) / scale + m.asc;
+        if (!line || Math.abs(y - line.y) > 3) {
+          line = { y: y, x0: x, x1: x, g: [], s: size };
+          lines.push(line);
+        }
+        line.g.push([Math.round(x * 10) / 10, ch, size]);
+        line.x0 = Math.min(line.x0, x);
+        line.x1 = Math.max(line.x1, x + r.width / scale);
+        line.s = Math.max(line.s, size);
+      }
+    }
+    for (var n = 0; n < lines.length; n++) {
+      lines[n].y = Math.round(lines[n].y * 10) / 10;
+      lines[n].x0 = Math.round(lines[n].x0 * 10) / 10;
+      lines[n].x1 = Math.round(lines[n].x1 * 10) / 10;
+    }
+    page.lines = lines;
+  }
+  // 文字の背景（帯）を、表示中のページの行に合わせて描く。
+  function drawBands() {
+    bands.innerHTML = "";
+    if (!current || !style().band) return;
+    for (var i = 0; i < current.lines.length; i++) {
+      var line = current.lines[i], m = metrics(current.family, line.s);
+      var padX = Math.max(4, Math.round(line.s * BAND_PAD_X)), padY = Math.max(2, Math.round(line.s * BAND_PAD_Y));
+      var el = document.createElement("div");
+      el.style.left = (line.x0 - padX) + "px";
+      el.style.top = (line.y - m.asc - padY) + "px";
+      el.style.width = (line.x1 - line.x0 + padX * 2) + "px";
+      el.style.height = (m.asc + m.desc + padY * 2) + "px";
+      el.style.borderRadius = Math.max(2, Math.round(line.s * BAND_RADIUS)) + "px";
+      el.style.background = style().band;
+      bands.appendChild(el);
+    }
+  }
+  function relayout(page) { fit(page); measure(page); }
+  // 枠がまだ画面に表示されていない（幅がほぼ0の）間は、文字の位置を正しく
+  // 測れない。その間は配置を確定させず、表示されてから測り直す。
+  function measurable() { return stage.clientWidth >= 40; }
+  function relayoutAll() {
+    if (!measurable()) { layoutKey = null; return; }
+    for (var i = 0; i < pages.length; i++) relayout(pages[i]);
+    layoutKey = style().key;
+    drawBands();
+    refreshNote();
+  }
+
+  // ---------------- Python側への送信 ----------------
+  function send_value() {
+    var value = {
+      rev: rev,
+      // フォントを読み込めていない間の配置は当てにならないので、使えないことを伝える。
+      style_key: fontReady ? layoutKey : null,
+      pages: pages.map(function (p) {
+        return { id: p.id, doc: serialize(p.ed), lines: p.lines, overflow: p.overflow, fallback: p.fallback };
+      }),
+      offset: { x: Math.round(offset.x), y: Math.round(offset.y), token: bgToken }
+    };
+    var json = JSON.stringify(value);
+    if (json === lastSent) return;  // 再実行のたびに同じ値を送り続けない
+    lastSent = json;
+    send("streamlit:setComponentValue", { value: value, dataType: "json" });
+  }
+  function flush() {
+    clearTimeout(timer);
+    timer = null;
+    if (!measurable()) return;
+    if (current) measure(current);
+    drawBands();
+    send_value();
+  }
+  function onInput(page) {
+    ensureBlock(page.ed);
+    fit(page);       // 文字サイズの自動縮小は、打った瞬間に反映する
+    bands.innerHTML = "";
+    refreshNote();
+    clearTimeout(timer);
+    timer = setTimeout(flush, COMMIT_DELAY);
+  }
+  function changedNow() {
+    if (current) fit(current);
+    flush();
+    refreshUi();
+  }
+
+  // ---------------- 表示 ----------------
+  function placement() {
+    // story_image.compute_background_placement() と同じ式。
+    var b = args.bg, cw = args.canvas.w, ch = args.canvas.h;
+    var s = b.fit === "height" ? ch / b.h : b.fit === "cover" ? Math.max(cw / b.w, ch / b.h) : cw / b.w;
+    var w = Math.max(1, Math.round(b.w * s)), h = Math.max(1, Math.round(b.h * s));
+    var maxX = Math.abs(cw - w) / 2, maxY = Math.abs(ch - h) / 2;
+    if (b.fit === "cover") { offset.x = 0; offset.y = 0; }
+    offset.x = Math.max(-maxX, Math.min(maxX, offset.x));
+    offset.y = Math.max(-maxY, Math.min(maxY, offset.y));
+    return { w: w, h: h, left: (cw - w) / 2 + offset.x, top: (ch - h) / 2 + offset.y,
+             movable: b.fit !== "cover" && (maxX >= 1 || maxY >= 1) };
+  }
+  function refreshUi() {
+    if (!args) return;
+    var c = args.canvas;
+    scale = stage.clientWidth / c.w;
+    stage.style.height = Math.round(c.h * scale) + "px";
+    stage.style.background = c.color;
+    canvas.style.width = c.w + "px";
+    canvas.style.height = c.h + "px";
+    canvas.style.transform = "scale(" + scale + ")";
+
+    var movable = false;
+    if (args.bg) {
+      var p = placement();
+      bg.style.display = "block";
+      bg.style.width = p.w * scale + "px";
+      bg.style.height = p.h * scale + "px";
+      bg.style.left = p.left * scale + "px";
+      bg.style.top = p.top * scale + "px";
+      shade.style.display = "block";
+      shade.style.opacity = args.bg.shade;
+      fill.style.display = args.bg.fill ? "block" : "none";
+      movable = p.movable;
+    } else {
+      bg.style.display = shade.style.display = fill.style.display = "none";
+    }
+    if (!movable) moveMode = false;
+    $("bggrp").style.display = movable ? "flex" : "none";
+    $("movebg").classList.toggle("on", moveMode);
+    $("movebg").textContent = moveMode ? "文字の編集に戻る" : "背景を動かす";
+    dragcover.style.display = moveMode ? "block" : "none";
+
+    for (var i = 0; i < pages.length; i++) {
+      var page = pages[i];
+      page.el.classList.toggle("current", page === current);
+      page.el.style.left = c.mx + "px";
+      page.el.style.top = c.mt + "px";
+      page.el.style.width = (c.w - c.mx * 2) + "px";
+      page.el.style.height = (c.h - c.mt - c.mb) + "px";
+      page.ed.style.color = style().color;
+      page.ed.style.caretColor = style().color;
+    }
+    var local = args.structure === "local", index = pages.indexOf(current);
+    $("pagegrp").style.display = local ? "flex" : "none";
+    $("merge").disabled = index <= 0;
+    $("pager").style.display = local && pages.length > 1 ? "flex" : "none";
+    $("pagelabel").textContent = (index + 1) + " / " + pages.length + " 枚目";
+    $("prev").disabled = index <= 0;
+    $("next").disabled = index >= pages.length - 1;
+    refreshNote();
+    resize();
+  }
+  function show(page) {
+    current = page;
+    savedRange = null;
+    drawBands();
+    refreshUi();
+  }
+
+  // ---------------- 選択範囲 ----------------
+  // ボタンを押すと編集中の文字からフォーカスが外れて選択が消えることがあるので、
+  // 最後の選択範囲を覚えておき、操作の前に戻す。
+  document.addEventListener("selectionchange", function () {
+    var sel = document.getSelection();
+    if (current && sel.rangeCount && current.ed.contains(sel.getRangeAt(0).commonAncestorContainer)) {
+      savedRange = sel.getRangeAt(0).cloneRange();
+    }
+  });
+  function restoreSelection() {
+    if (!current || !savedRange || !current.ed.contains(savedRange.commonAncestorContainer)) return null;
+    current.ed.focus();
+    var sel = document.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(savedRange);
+    return sel.getRangeAt(0);
+  }
+  function setCaret(node, offsetInNode) {
+    var caret = document.createRange();
+    caret.setStart(node, offsetInNode);
+    caret.collapse(true);
+    var sel = document.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(caret);
+    savedRange = caret.cloneRange();
+  }
+  function topBlock(node, ed) {
+    while (node && node.parentNode !== ed) node = node.parentNode;
+    return node && node.nodeType === 1 ? node : null;
+  }
+
+  // ---------------- 操作 ----------------
+  // 寄せ: 選択範囲にかかっている行（段落）すべてに適用する。選択していなければカーソルのある行。
+  function setAlign(align) {
+    var range = restoreSelection();
+    if (!range) return say("寄せを変える行をクリック（タップ）するか、範囲を選択してください。");
+    var ed = current.ed;
+    var block = topBlock(range.startContainer, ed) || ed.firstChild;
+    var last = topBlock(range.endContainer, ed) || block;
+    for (; block; block = block.nextSibling) {
+      if (block.nodeType === 1) block.style.textAlign = align === "left" ? "" : align;
+      if (block === last) break;
+    }
+    say("");
+    changedNow();
+  }
+  // 文字サイズ: 選択した文字だけに適用する。
+  function setSize(mode) {
+    var range = restoreSelection();
+    if (!range || range.collapsed) return say("サイズを変える文字を、ドラッグ（スマホは長押し）で選択してください。");
+    var ed = current.ed, base = style().base;
+    var probe = range.startContainer;
+    if (probe.nodeType === 1) probe = probe.childNodes[range.startOffset] || probe;
+    var now = sizeOf(probe, ed) || base;
+    var size = mode === "normal" ? 0
+      : Math.max(MIN_SIZE, Math.min(MAX_SIZE, now + (mode === "larger" ? SIZE_STEP : -SIZE_STEP)));
+
+    // 選択範囲を確実に分割して囲むために、ブラウザ標準のfontSize操作で一旦
+    // <font size="7">に囲ませ、それを自前のspan[data-s]へ置き換える。
+    document.execCommand("styleWithCSS", false, false);
+    document.execCommand("fontSize", false, "7");
+    var fonts = ed.querySelectorAll('font[size="7"]');
+    var first = null, lastSpan = null;
+    for (var i = 0; i < fonts.length; i++) {
+      var span = document.createElement("span");
+      span.setAttribute("data-s", size);  // 0 は「標準サイズ」（外側のサイズ指定を打ち消す）
+      while (fonts[i].firstChild) span.appendChild(fonts[i].firstChild);
+      var inner = span.querySelectorAll("[data-s]");
+      for (var j = 0; j < inner.length; j++) inner[j].setAttribute("data-s", size);
+      fonts[i].replaceWith(span);
+      // 同じ文字に何度もサイズを指定しても、spanが入れ子に増えていかないようにする。
+      var outer = span.parentElement;
+      if (outer !== ed && outer.hasAttribute("data-s") && outer.childNodes.length === 1) outer.replaceWith(span);
+      first = first || span;
+      lastSpan = span;
+    }
+    if (first) {
+      var r = document.createRange();
+      r.setStartBefore(first);
+      r.setEndAfter(lastSpan);
+      var sel = document.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+      savedRange = r.cloneRange();
+    }
+    say(size ? "選択した文字のサイズ: " + size + "（標準は " + base + "）" : "選択した文字を標準サイズに戻しました。");
+    changedNow();
+  }
+  // 改ページ: カーソルの位置から後ろを、新しいページ（次の画像）へ移す。
+  function pageBreak() {
+    var range = restoreSelection();
+    if (!range) return say("改ページを入れる位置をクリック（タップ）してください。");
+    range.collapse(true);
+    var ed = current.ed, block = topBlock(range.startContainer, ed);
+    var next = makePage(newId(), []);
+    next.ed.innerHTML = "";
+    if (block) {
+      var tail = document.createRange();
+      tail.setStart(range.startContainer, range.startOffset);
+      tail.setEnd(block, block.childNodes.length);
+      var after = block.cloneNode(false);
+      after.appendChild(tail.extractContents());
+      if (after.textContent) next.ed.appendChild(after);
+      while (block.nextSibling) next.ed.appendChild(block.nextSibling);
+      if (!block.textContent) block.remove();
+    }
+    ensureBlock(ed);
+    ensureBlock(next.ed);
+    current.el.after(next.el);
+    pages.splice(pages.indexOf(current) + 1, 0, next);
+    fit(current); measure(current);
+    relayout(next);
+    show(next);
+    next.ed.focus();
+    setCaret(next.ed.firstChild, 0);
+    say("");
+    send_value();
+  }
+  // 前のページと結合: 表示中のページの文章を、前のページの末尾につなげる。
+  function mergeWithPrevious() {
+    var index = pages.indexOf(current);
+    if (index <= 0) return;
+    var prev = pages[index - 1], gone = current;
+    while (gone.ed.firstChild) prev.ed.appendChild(gone.ed.firstChild);
+    gone.el.remove();
+    pages.splice(index, 1);
+    relayout(prev);
+    show(prev);
+    say("");
+    send_value();
+  }
+
+  var buttons = document.querySelectorAll("#bar button");
+  for (var i = 0; i < buttons.length; i++) {
+    // 押した瞬間に、編集中の文字の選択が外れないようにする。
+    buttons[i].addEventListener("pointerdown", function (e) { e.preventDefault(); });
+    buttons[i].addEventListener("mousedown", function (e) { e.preventDefault(); });
+    buttons[i].addEventListener("click", function (e) {
+      var cmd = e.currentTarget.getAttribute("data-cmd");
+      if (cmd === "left" || cmd === "center" || cmd === "right") setAlign(cmd);
+      else if (cmd === "pagebreak") pageBreak();
+      else if (cmd === "merge") mergeWithPrevious();
+      else if (cmd === "movebg") { moveMode = !moveMode; refreshUi(); }
+      else if (cmd === "resetbg") { offset = { x: 0, y: 0 }; refreshUi(); send_value(); }
+      else setSize(cmd);
+    });
+  }
+  $("prev").addEventListener("click", function () { show(pages[pages.indexOf(current) - 1]); });
+  $("next").addEventListener("click", function () { show(pages[pages.indexOf(current) + 1]); });
+
+  // 背景の移動（「背景を動かす」を押している間だけ）。
+  dragcover.addEventListener("pointerdown", function (e) {
+    drag = { px: e.clientX, py: e.clientY, x: offset.x, y: offset.y };
+    dragcover.setPointerCapture(e.pointerId);
+    dragcover.classList.add("dragging");
+    e.preventDefault();
+  });
+  dragcover.addEventListener("pointermove", function (e) {
+    if (!drag) return;
+    offset.x = drag.x + (e.clientX - drag.px) / scale;
+    offset.y = drag.y + (e.clientY - drag.py) / scale;
+    refreshUi();
+  });
+  function endDrag() {
+    if (!drag) return;
+    drag = null;
+    dragcover.classList.remove("dragging");
+    send_value();
+  }
+  dragcover.addEventListener("pointerup", endDrag);
+  dragcover.addEventListener("pointercancel", endDrag);
+
+  // ---------------- Python側からの指示 ----------------
+  function loadFonts() {
+    var fonts = [style().font].concat(style().fallback ? [style().fallback] : []);
+    var key = fonts.map(function (f) { return f.name; }).join("+");
+    if (key === fontKey) return;
+    fontKey = key;
+    fontReady = false;
+    refreshNote();
+    Promise.all(fonts.map(function (f) {
+      var face = new FontFace(f.name, "url(" + JSON.stringify(f.url) + ")");
+      document.fonts.add(face);
+      return face.load();
+    })).then(function () {
+      if (key !== fontKey) return;  // 読み込み中に別のフォントへ切り替えられた
+      fontReady = true;
+      metricsCache = {};
+      relayoutAll();
+      refreshUi();
+      send_value();
+    }, function () {
+      if (key === fontKey) say("フォントを読み込めませんでした。ページを再読み込みしてください。");
+    });
+  }
+  function syncPages() {
+    var wanted = args.pages || [];
+    if (args.rev !== rev) {
+      // 初回、またはPython側で文書が作り直された（元に戻す・最初の状態に戻す等）。
+      rev = args.rev;
+      clearTimeout(timer);
+      timer = null;
+      for (var i = 0; i < pages.length; i++) pages[i].el.remove();
+      pages = wanted.map(function (p) { return makePage(p.id, p.doc); });
+      current = null;
+      return true;
+    }
+    if (args.structure !== "host") return false;
+    // ページの追加・削除・並び替えはPython側が行う。内容は、こちらで編集中のものを保つ。
+    var byId = {}, changed = false;
+    for (var a = 0; a < pages.length; a++) byId[pages[a].id] = pages[a];
+    var next = wanted.map(function (p) {
+      if (byId[p.id]) { var kept = byId[p.id]; delete byId[p.id]; return kept; }
+      changed = true;
+      return makePage(p.id, p.doc);
+    });
+    for (var id in byId) { byId[id].el.remove(); changed = true; }
+    pages = next;
+    return changed;
+  }
+  window.addEventListener("message", function (e) {
+    if (!e.data || e.data.type !== "streamlit:render") return;
+    args = e.data.args;
+    var rebuilt = syncPages();
+    if (args.structure === "host") {
+      current = pages.filter(function (p) { return p.id === args.current; })[0] || pages[0] || null;
+    } else if (pages.indexOf(current) < 0) {
+      current = pages[0] || null;
+    }
+    if (args.bg) {
+      if (args.bg.token !== bgToken) { bgToken = args.bg.token; offset = { x: 0, y: 0 }; }
+      if (bgimg.getAttribute("src") !== args.bg.url) bgimg.src = args.bg.url;
+      if (args.bg.fill && fill.getAttribute("src") !== args.bg.fill) fill.src = args.bg.fill;
+    } else {
+      bgToken = null;
+    }
+    refreshUi();
+    loadFonts();
+    if (fontReady && (rebuilt || layoutKey !== style().key)) {
+      relayoutAll();
+      refreshUi();
+      send_value();
+    } else {
+      drawBands();
+    }
+  });
+  window.addEventListener("resize", function () {
+    if (!args) return;
+    refreshUi();
+    if (fontReady && layoutKey !== style().key && measurable()) {
+      relayoutAll();
+      refreshUi();
+      send_value();
+    }
+  });
+  // 文字のない場所（画像の余白など）を押したときは、文章の末尾にカーソルを置く。
+  stage.addEventListener("mousedown", function (e) {
+    if (!current || moveMode || e.target.closest(".ed")) return;
+    e.preventDefault();
+    current.ed.focus();
+    var end = document.createRange();
+    end.selectNodeContents(current.ed);
+    end.collapse(false);
+    var sel = document.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(end);
+  });
+
+  send("streamlit:componentReady", { apiVersion: 1 });
+})();
+</script>
+</body>
+</html>

@@ -1,13 +1,25 @@
 import hashlib
+import io
 import json
 import math
 import uuid
 
 import streamlit as st
+from PIL import Image
 
-from app_fonts import DEFAULT_FONT_KEY, FONT_OPTIONS
+from app_fonts import (
+    DEFAULT_FONT_KEY,
+    FONT_OPTIONS,
+    JAPANESE_FALLBACK_KEY,
+    browser_fallback_font,
+    browser_font,
+)
 from app_meta import inject_mobile_meta_tags, resolve_page_icon
-from carousel_generator import generate_carousel_page_image
+from carousel_generator import (
+    CAROUSEL_CANVAS,
+    generate_carousel_page_image,
+    render_carousel_text_layer,
+)
 from carousel_splitter import split_into_pages
 from carousel_ui import (
     REDO_BUTTON_LABEL,
@@ -26,14 +38,23 @@ from cloudinary_storage import (
 )
 from instagram_api import InstagramAPIError, get_instagram_credentials, post_story
 from reply_filters import filter_own_replies
-from rich_editor import editor_value, rich_editor
-from rich_text import split_pages, text_to_doc
+from page_editor import (
+    STRUCTURE_HOST,
+    STRUCTURE_LOCAL,
+    background_fill_data_url,
+    background_preview_data_url,
+    inject_mobile_media_picker_fix,
+    page_editor,
+    read_editor_value,
+)
+from rich_text import doc_to_text, render_lines_layer, text_to_doc
 from story_image import (
     BG_FIT_HEIGHT,
     BG_FIT_WIDTH,
     DEFAULT_MAX_FONT_SIZE,
     DEFAULT_TEXT_BG_COLOR,
     DEFAULT_TEXT_COLOR,
+    STORY_CANVAS,
     STORY_DEFAULT_TEXT_COLOR,
     StoryImageError,
     convert_png_to_jpeg,
@@ -41,13 +62,6 @@ from story_image import (
     image_to_png_bytes,
     load_background_image,
     render_story_text_layer,
-)
-from story_preview import (
-    background_fill_data_url,
-    background_preview_data_url,
-    inject_mobile_media_picker_fix,
-    story_preview,
-    to_data_url,
 )
 from story_video import (
     MAX_VIDEO_SECONDS,
@@ -81,6 +95,12 @@ DEFAULT_OVERLAY_PERCENT = 65
 # 完成画像（右クリック / 長押しで保存する用）の表示。
 SAVE_IMAGE_HINT = "画像を右クリック（スマホは長押し）すると、そのまま画像として保存できます。"
 SAVE_IMAGE_WIDTH = 320
+
+OVERFLOW_WARNING = "文章が画像に収まりきっていません。文章を減らすか、ページを分けてください。"
+EDIT_HINT = (
+    "画像の上の文字を、そのままクリック（スマホはタップ）して編集できます。"
+    "寄せは行ごと、文字サイズは選択した文字に適用されます。"
+)
 
 
 def _show_saveable_image(png_bytes, key, caption=None):
@@ -204,16 +224,36 @@ def _doc_key(doc) -> str:
     return json.dumps(doc, ensure_ascii=False, sort_keys=True)
 
 
-@st.cache_data(show_spinner=False, max_entries=60)
-def _cached_story_text_layer(doc_key, text_color, text_bg_color, max_font_size, font_key):
+@st.cache_data(show_spinner=False, max_entries=200)
+def _cached_text_layer(
+    kind, doc_key, lines_key, use_fallback_font, text_color, text_bg_color, max_font_size, font_key
+):
     """
-    ストーリーズ1ページぶんの、文字だけを描いた透明レイヤー（PNG）をキャッシュする。
-    プレビューでは背景の上に重ねて表示し、動画の書き出しでは動画の上に合成する。
+    1ページぶんの、文字だけを描いた透明レイヤー（PNG）をキャッシュする。
+    完成画像・動画の書き出しでは、これを背景の上に重ねる。
 
-    doc_keyは_doc_key()で文字列にした1ページぶんの文書。
+    kindは "story" または "carousel"。
+    lines_keyがあれば、編集画面（ブラウザ）が組んだ配置どおりに描く
+    （編集中の見た目と一致する。通常はこちら）。lines_keyがNoneのときは、
+    doc_key（_doc_key()で文字列にした文書）をPython側で組んで描く
+    （配置がまだ届いていない、表示直後・設定を変えた直後だけの代わり）。
+
     戻り値: (PNGのバイト列, 警告メッセージ または None)
     """
-    layer, warning = render_story_text_layer(
+    if lines_key is not None:
+        canvas = STORY_CANVAS if kind == "story" else CAROUSEL_CANVAS
+        layer = render_lines_layer(
+            json.loads(lines_key),
+            (canvas["w"], canvas["h"]),
+            text_color,
+            text_bg_color,
+            # "Arial"で日本語を含むページは、編集画面と同じく代替フォントで描く。
+            font_key=JAPANESE_FALLBACK_KEY if use_fallback_font else font_key,
+        )
+        return image_to_png_bytes(layer), None
+
+    render = render_story_text_layer if kind == "story" else render_carousel_text_layer
+    layer, warning = render(
         json.loads(doc_key),
         text_color=text_color,
         text_bg_color=text_bg_color,
@@ -223,33 +263,40 @@ def _cached_story_text_layer(doc_key, text_color, text_bg_color, max_font_size, 
     return image_to_png_bytes(layer), warning
 
 
+def _page_text_layer(kind, page, text_color, text_bg_color, max_font_size, font_key):
+    """
+    read_editor_value()のページ情報（"doc"と、あれば"lines"）から文字レイヤーを作る。
+    戻り値: (PNGのバイト列, 警告メッセージ または None)
+    """
+    if page.get("lines") is not None:
+        layer_png, _ = _cached_text_layer(
+            kind, None, _doc_key(page["lines"]), page.get("fallback", False),
+            text_color, text_bg_color, None, font_key,
+        )
+        warning = OVERFLOW_WARNING if page.get("overflow") else None
+        return layer_png, warning
+    return _cached_text_layer(
+        kind, _doc_key(page["doc"]), None, False, text_color, text_bg_color, max_font_size, font_key
+    )
+
+
+def _layer_key(layer_png) -> str:
+    return hashlib.sha256(layer_png).hexdigest()
+
+
 @st.cache_data(show_spinner=False, max_entries=60)
 def _cached_story_image(
-    doc_key,
-    bg_cache_key,
-    text_color,
-    text_bg_color,
-    max_font_size,
-    overlay_opacity,
-    font_key,
-    bg_fit,
-    bg_offset,
-    _background_image,
+    layer_key, bg_cache_key, overlay_opacity, bg_fit, bg_offset, _layer_png, _background_image
 ):
     """
-    ストーリーズ1ページぶんのgenerate_story_image()の結果をキャッシュする。
-
-    すべての入力値が一致する場合は再生成をスキップする。完成画像の表示・
-    Instagram投稿は、この関数が返す同じ結果をそのまま使う。
+    ストーリーズ1ページぶんの完成画像（PNG）をキャッシュする。
+    文字レイヤー・背景は大きいのでハッシュ対象にせず、layer_key・bg_cache_keyで区別する。
+    完成画像の表示・Instagram投稿は、この関数が返す同じ結果をそのまま使う。
     """
     return generate_story_image(
-        json.loads(doc_key),
+        Image.open(io.BytesIO(_layer_png)),
         background_image=_background_image,
-        text_color=text_color,
-        text_bg_color=text_bg_color,
-        max_font_size=max_font_size,
         overlay_opacity=overlay_opacity,
-        font_key=font_key,
         bg_fit=bg_fit,
         bg_offset=bg_offset,
     )
@@ -257,33 +304,20 @@ def _cached_story_image(
 
 @st.cache_data(show_spinner=False, max_entries=80)
 def _cached_carousel_page_image(
-    doc_key,
-    bg_cache_key,
-    text_color,
-    text_bg_color,
-    max_font_size,
-    overlay_opacity,
-    font_key,
-    _background_image,
+    layer_key, bg_cache_key, overlay_opacity, _layer_png, _background_image
 ):
     """
-    generate_carousel_page_image()の結果をキャッシュする。
+    カルーセル1ページぶんの完成画像（PNG）をキャッシュする。
 
     これにより、ページを選択しただけ・他のページを編集しただけ・
     ページを並び替えただけ・前後移動しただけ・ページを削除しただけ、
     といった「そのページ自身の見た目には影響しない操作」では、
     各ページの画像を再生成せずに済む（キャッシュキーが変わらないため）。
-    本文・背景・デザイン設定のいずれかが変わったページ、または
-    新しく追加されたページだけが実際に再生成される。
     """
     return generate_carousel_page_image(
-        json.loads(doc_key),
+        Image.open(io.BytesIO(_layer_png)),
         background_image=_background_image,
-        text_color=text_color,
-        text_bg_color=text_bg_color,
-        max_font_size=max_font_size,
         overlay_opacity=overlay_opacity,
-        font_key=font_key,
     )
 
 
@@ -365,7 +399,7 @@ def _apply_carousel_state(state, reset_id):
     Undo/Redoで選んだスナップショットの内容を、実際のセッション状態へ書き戻す。
 
     本文（文書）をPython側で差し替えるので、編集欄がそれを読み込み直すよう
-    carousel_doc_revを進める（rich_editor.pyを参照）。
+    carousel_doc_revを進める（page_editor.pyを参照）。
     """
     st.session_state.carousel_page_ids = list(state["page_ids"])
     st.session_state.carousel_store = dict(state["texts"])
@@ -777,54 +811,97 @@ if result and result["mode"] == MODE_INSTAGRAM:
             with st.expander("デバッグ情報（エラー詳細）"):
                 st.write(e.detail or "詳細情報はありません。")
 
-    # --- 文章の編集 ---
-    # 文章は「書式つきの文書」として持つ。変換し直すたび（reset_idが変わるたび）に、
-    # Threadsの本文と返信を空行でつないだ、書式なしの文書へ戻す。
-    # revは、Python側で文書を作り直すたびに進める番号（編集欄がそれを見て
-    # 表示を読み込み直す。rich_editor.pyを参照）。
-    def _initial_story_doc():
-        return text_to_doc("\n\n".join([result["original_text"]] + result["reply_texts"]))
+    # --- 編集画面（プレビュー上で直接編集） ---
+    # 文章は「書式つきの文書」（rich_text.py）をページごとに持つ。変換し直すたび
+    # （reset_idが変わるたび）に、Threadsの本文と返信を空行でつないだ、書式なしの
+    # 1ページへ戻す。改ページ・結合は編集画面の中で行われ、その結果のページ構成が
+    # そのまま返ってくる。revは、Python側で文書を作り直すたびに進める番号
+    # （編集画面がそれを見て読み込み直す。page_editor.pyを参照）。
+    def _initial_story_pages():
+        text = "\n\n".join([result["original_text"]] + result["reply_texts"])
+        return [{"id": "p0", "doc": text_to_doc(text)}]
 
     story_edit = st.session_state.story_edit
     if story_edit is None or story_edit["reset_id"] != reset_id:
-        story_edit = {"reset_id": reset_id, "doc": _initial_story_doc(), "rev": 0}
+        story_edit = {"reset_id": reset_id, "pages": _initial_story_pages(), "rev": 0}
         st.session_state.story_edit = story_edit
 
-    st.markdown('<div class="tt-step-title">文章の編集</div>', unsafe_allow_html=True)
+    # 組版（折り返し・文字の位置）に影響する設定の識別子。編集画面から返ってきた
+    # 配置が、いまの設定で組まれたものかどうかの判定に使う。
+    story_style_key = f"{story_font_choice}:{font_size}"
+    bg_token = f"{bg_cache_key}:{bg_fit}"
+    story_background = None
+    if background_image is not None:
+        preview_bg_url, preview_fill_url = _cached_preview_background(
+            preview_bg_key, background_image
+        )
+        story_background = {
+            "url": preview_bg_url,
+            "fill": preview_fill_url,
+            "w": background_image.width,
+            "h": background_image.height,
+            "fit": bg_fit,
+            "shade": overlay_percent / 100,
+            "token": bg_token,
+        }
+
+    st.markdown('<div class="tt-step-title">プレビュー・編集</div>', unsafe_allow_html=True)
     st.caption(
-        "文字はそのまま入力・削除できます。寄せは行ごと、文字サイズは選択した文字に"
-        "適用されます。「改ページ」を入れると、その位置から次の画像（2枚目以降）になります。"
+        EDIT_HINT + "「改ページ」を押すと、カーソルから後ろが次の画像（2枚目以降）になります。"
     )
-    story_edit["doc"] = rich_editor(
-        story_edit["doc"],
-        rev=story_edit["rev"],
-        base_size=font_size,
-        key=f"story_editor_{reset_id}",
-        allow_pagebreak=True,
+    story_edited = read_editor_value(
+        page_editor(
+            story_edit["pages"],
+            rev=story_edit["rev"],
+            style={
+                "key": story_style_key,
+                "font": browser_font(story_font_choice),
+                "fallback": browser_fallback_font(story_font_choice),
+                "base": font_size,
+                "color": text_color,
+                "band": text_bg_color,
+            },
+            canvas=STORY_CANVAS,
+            key=f"story_page_editor_{reset_id}",
+            background=story_background,
+            structure=STRUCTURE_LOCAL,
+        ),
+        story_edit["rev"],
+        story_style_key,
+        STORY_CANVAS,
     )
+    bg_offset = (0, 0)
+    if story_edited and story_edited["pages"]:
+        story_edit["pages"] = [
+            {"id": page["id"], "doc": page["doc"]} for page in story_edited["pages"]
+        ]
+        story_page_infos = story_edited["pages"]
+        # 別の背景・別の差し込み方のときに返ってきた古い位置は使わない。
+        if story_edited["offset"][2] == bg_token:
+            bg_offset = story_edited["offset"][:2]
+    else:
+        story_page_infos = story_edit["pages"]
+
     if st.button("文章を最初の状態に戻す", key=f"story_doc_reset_{reset_id}"):
-        story_edit["doc"] = _initial_story_doc()
+        story_edit["pages"] = _initial_story_pages()
         story_edit["rev"] += 1
         st.rerun()
 
-    story_pages = split_pages(story_edit["doc"])  # ページごとの文書
-    story_page_count = len(story_pages)
+    # 文字のないページ（改ページしただけで何も書いていないページ）は、画像にしない。
+    story_output_pages = [
+        page for page in story_page_infos if doc_to_text(page["doc"]).strip()
+    ] or story_page_infos[:1]
+    story_page_count = len(story_output_pages)
 
-    # 「プレビューを更新」ボタンは使わず、文章やデザイン設定を変更するたびに、
-    # Streamlitのwidget再実行の仕組みを利用して、現在の入力値からその場で
-    # 文字レイヤーを再生成する。Threads APIは呼ばず、ローカルのPillow処理のみ。
-    # プレビューは「背景」と「文字レイヤー」をブラウザ側で重ねて表示しており、
-    # 背景をドラッグした位置（bg_offset）が書き出しにそのまま使われる。
+    # 文字レイヤーは、編集画面が組んだ配置どおりにここで描く（Threads APIは呼ばず、
+    # ローカルのPillow処理のみ）。背景を動かした位置（bg_offset）も書き出しに
+    # そのまま使われる。
     page_layers = []  # ページごとの (文字レイヤーPNG, 警告)
     try:
-        for story_page in story_pages:
+        for story_page in story_output_pages:
             page_layers.append(
-                _cached_story_text_layer(
-                    _doc_key(story_page),
-                    text_color=text_color,
-                    text_bg_color=text_bg_color,
-                    max_font_size=font_size,
-                    font_key=story_font_choice,
+                _page_text_layer(
+                    "story", story_page, text_color, text_bg_color, font_size, story_font_choice
                 )
             )
     except StoryImageError as e:
@@ -843,22 +920,6 @@ if result and result["mode"] == MODE_INSTAGRAM:
                 st.warning(
                     (f"{number}枚目: " if story_page_count > 1 else "") + page_warning
                 )
-        st.markdown('<div class="tt-step-title">プレビュー</div>', unsafe_allow_html=True)
-        preview_bg_url, preview_fill_url = (
-            _cached_preview_background(preview_bg_key, background_image)
-            if background_image is not None
-            else (None, None)
-        )
-        bg_offset = story_preview(
-            text_layer_urls=[to_data_url(layer_png, "image/png") for layer_png, _ in page_layers],
-            bg_url=preview_bg_url,
-            fill_url=preview_fill_url,
-            bg_size=background_image.size if background_image is not None else None,
-            fit=bg_fit,
-            shade=overlay_percent / 100,
-            token=f"{bg_cache_key}:{bg_fit}",
-            key=f"story_preview_{reset_id}",
-        )
 
         def _page_label(number):
             """複数ページのときだけ「N枚目」を付ける。"""
@@ -866,8 +927,8 @@ if result and result["mode"] == MODE_INSTAGRAM:
 
         if bg_is_video:
             st.caption(
-                "プレビューは動画の1コマを表示しています。"
-                "位置を決めたら「動画を書き出す」を押してください。"
+                "上の画面は動画の1コマを表示しています。"
+                "文章と位置を決めたら「動画を書き出す」を押してください。"
             )
             video_signature = hashlib.sha256(
                 repr(
@@ -937,38 +998,34 @@ if result and result["mode"] == MODE_INSTAGRAM:
                 st.info("設定が変更されました。もう一度「動画を書き出す」を押してください。")
         else:
             try:
-                for story_page in story_pages:
-                    page_png, _ = _cached_story_image(
-                        _doc_key(story_page),
-                        bg_cache_key=bg_cache_key,
-                        text_color=text_color,
-                        text_bg_color=text_bg_color,
-                        max_font_size=font_size,
-                        overlay_opacity=overlay_percent / 100,
-                        font_key=story_font_choice,
-                        bg_fit=bg_fit,
-                        bg_offset=bg_offset,
-                        _background_image=background_image,
+                for layer_png, _ in page_layers:
+                    post_media_list.append(
+                        _cached_story_image(
+                            _layer_key(layer_png),
+                            bg_cache_key=bg_cache_key,
+                            overlay_opacity=overlay_percent / 100,
+                            bg_fit=bg_fit,
+                            bg_offset=bg_offset,
+                            _layer_png=layer_png,
+                            _background_image=background_image,
+                        )
                     )
-                    post_media_list.append(page_png)
             except StoryImageError as e:
                 post_media_list = []
                 st.error(e.friendly_message)
                 with st.expander("デバッグ情報（エラー詳細）"):
                     st.write(e.detail or "詳細情報はありません。")
             else:
-                # 完成画像は、ダウンロードボタンではなく通常の画像として表示し、
-                # 右クリック（スマホは長押し）でそのまま保存できるようにする。
-                # 上のプレビューは背景のドラッグ操作用に層を重ねた表示で、
-                # 1枚の画像としては保存できないため、別に表示している。
-                st.markdown(
-                    '<div class="tt-step-title">完成画像</div>', unsafe_allow_html=True
-                )
-                st.caption(SAVE_IMAGE_HINT)
-                for number, page_png in enumerate(post_media_list, start=1):
-                    _show_saveable_image(
-                        page_png, key=f"story_{number}", caption=_page_label(number)
-                    )
+                # 完成画像は通常の画像として並べ、右クリック（スマホは長押し）で
+                # そのまま保存できるようにする。上の編集画面は文字・背景を重ねた
+                # 表示で、1枚の画像としては保存できないため、別に用意している。
+                # 画面を増やさないよう、普段は折りたたんでおく。
+                with st.expander(f"画像を保存する（全{story_page_count}枚）"):
+                    st.caption(SAVE_IMAGE_HINT)
+                    for number, page_png in enumerate(post_media_list, start=1):
+                        _show_saveable_image(
+                            page_png, key=f"story_{number}", caption=_page_label(number)
+                        )
 
     if post_media_list:
         # Instagramへの投稿にも、常にこの（現在の設定から書き出した）
@@ -1209,18 +1266,28 @@ elif result and result["mode"] == MODE_CAROUSEL:
         st.session_state.carousel_selected_id = page_ids[0]
     selected_id = st.session_state.carousel_selected_id
 
-    # --- 編集欄の内容をcarousel_storeへ反映 ---
-    # 編集欄はページごとに別のkeyで、選択中の1ページぶんだけをこのブロックの
-    # 最後で描画している。その最新の編集内容をここで先に読み取り、保存領域へ
-    # 書き戻す。以降のサムネイル生成・Undo履歴の判定は、すべてこの保存領域を
-    # 参照する。Undo/Redoの直後に残っている古い編集内容は、carousel_doc_revが
-    # 違うことで捨てられる。
-    if selected_id is not None:
-        edited_doc = editor_value(
-            f"carousel_editor_{selected_id}", st.session_state.carousel_doc_rev
-        )
-        if edited_doc is not None:
-            st.session_state.carousel_store[selected_id] = edited_doc
+    # --- 編集画面の内容をcarousel_storeへ反映 ---
+    # 編集画面（プレビュー上で直接編集）は、このブロックの下の方で描画している。
+    # その最新の編集内容をここで先に読み取り、保存領域へ書き戻す。以降の
+    # サムネイル生成・Undo履歴の判定は、すべてこの保存領域を参照する。
+    # Undo/Redoの直後に残っている古い編集内容は、carousel_doc_revが違うことで
+    # 捨てられる。
+    carousel_editor_key = f"carousel_page_editor_{reset_id}"
+    design_now = _current_carousel_design(reset_id)
+    # 組版（折り返し・文字の位置）に影響する設定の識別子。
+    carousel_style_key = f"{design_now['font_choice']}:{design_now['font_size']}"
+    carousel_page_infos = {}  # ページID -> 編集画面が組んだ配置などの情報
+    carousel_edited = read_editor_value(
+        st.session_state.get(carousel_editor_key),
+        st.session_state.carousel_doc_rev,
+        carousel_style_key,
+        CAROUSEL_CANVAS,
+    )
+    if carousel_edited:
+        for page in carousel_edited["pages"]:
+            if page["id"] in st.session_state.carousel_store:
+                st.session_state.carousel_store[page["id"]] = page["doc"]
+                carousel_page_infos[page["id"]] = page
 
     # ここまでの内容（テキスト編集・デザイン変更）を反映したうえで、
     # 今回の実行で確定した状態を履歴に記録する。
@@ -1411,21 +1478,31 @@ elif result and result["mode"] == MODE_CAROUSEL:
 
     carousel_bg_cache_key = _background_cache_key(carousel_bg_file_bytes)
 
-    def _generate_carousel_preview(page_doc):
-        # 本文・背景・デザイン設定のいずれも変わっていないページは、
-        # _cached_carousel_page_image()がキャッシュ済みの画像をそのまま
-        # 返す（ページ選択・他ページの編集・並び替え・前後移動・削除の
+    def _generate_carousel_preview(pid, page_doc):
+        # 文字レイヤーは、編集画面が組んだ配置があればそのとおりに描く（まだ届いて
+        # いない新しいページなどは、Python側で組んだもので代用する）。
+        # 本文・背景・デザイン設定のいずれも変わっていないページは、キャッシュ済みの
+        # 画像をそのまま返す（ページ選択・他ページの編集・並び替え・前後移動・削除の
         # いずれでも、影響を受けないページの画像は再生成されない）。
-        return _cached_carousel_page_image(
-            _doc_key(page_doc),
+        info = carousel_page_infos.get(pid)
+        if info is None or info["doc"] != page_doc:
+            info = {"doc": page_doc}
+        layer_png, warning = _page_text_layer(
+            "carousel",
+            info,
+            carousel_text_color,
+            carousel_text_bg_color,
+            carousel_font_size,
+            carousel_font_choice,
+        )
+        page_png = _cached_carousel_page_image(
+            _layer_key(layer_png),
             bg_cache_key=carousel_bg_cache_key,
-            text_color=carousel_text_color,
-            text_bg_color=carousel_text_bg_color,
-            max_font_size=carousel_font_size,
             overlay_opacity=carousel_overlay_percent / 100,
-            font_key=carousel_font_choice,
+            _layer_png=layer_png,
             _background_image=carousel_background_image,
         )
+        return page_png, warning
 
     # ここまでのボタン操作でページ構成が変わっていないことが確定した状態で描画する。
     page_ids = st.session_state.carousel_page_ids
@@ -1455,7 +1532,7 @@ elif result and result["mode"] == MODE_CAROUSEL:
                     page_warning = None
                     try:
                         page_image_bytes, page_warning = _generate_carousel_preview(
-                            page_docs.get(pid, [])
+                            pid, page_docs.get(pid, [])
                         )
                     except StoryImageError as e:
                         if is_selected:
@@ -1495,10 +1572,46 @@ elif result and result["mode"] == MODE_CAROUSEL:
         if selected_warning:
             st.warning(selected_warning)
 
-        # 完成画像は、ダウンロードボタンではなく通常の画像として全ページぶん
-        # 並べ、右クリック（スマホは長押し）でそのまま保存できるようにする。
-        # 上のカードは長押しが並び替えのドラッグに使われるため、保存用は
-        # 別に表示している。
+        # 選択中ページの編集画面。画像の上の文字をそのまま編集できる。
+        # ページの追加・削除・並び替えは上の操作パネルとカードで行い、ここは
+        # 全ページの文章を預かって、選択中の1ページだけを表示・編集する。
+        # 編集内容は、次の再実行の冒頭（このブロックの上の方）でcarousel_storeへ
+        # 反映している。
+        st.caption(EDIT_HINT)
+        carousel_background = None
+        if carousel_background_image is not None:
+            carousel_background = {
+                "url": _cached_preview_background(
+                    carousel_bg_cache_key, carousel_background_image
+                )[0],
+                "fill": None,
+                "w": carousel_background_image.width,
+                "h": carousel_background_image.height,
+                "fit": "cover",
+                "shade": carousel_overlay_percent / 100,
+                "token": carousel_bg_cache_key,
+            }
+        page_editor(
+            [{"id": pid, "doc": page_docs[pid]} for pid in page_ids],
+            rev=st.session_state.carousel_doc_rev,
+            style={
+                "key": f"{carousel_font_choice}:{carousel_font_size}",
+                "font": browser_font(carousel_font_choice),
+                "fallback": browser_fallback_font(carousel_font_choice),
+                "base": carousel_font_size,
+                "color": carousel_text_color,
+                "band": carousel_text_bg_color,
+            },
+            canvas=CAROUSEL_CANVAS,
+            key=carousel_editor_key,
+            background=carousel_background,
+            structure=STRUCTURE_HOST,
+            current=selected_id,
+        )
+
+        # 完成画像は通常の画像として全ページぶん並べ、右クリック（スマホは長押し）で
+        # そのまま保存できるようにする。上のカードは長押しが並び替えのドラッグに
+        # 使われ、編集画面は1枚の画像ではないため、保存用は別に用意している。
         if all_page_images:
             with st.expander(f"画像を保存する（全{len(all_page_images)}ページ）"):
                 st.caption(SAVE_IMAGE_HINT)
@@ -1506,22 +1619,6 @@ elif result and result["mode"] == MODE_CAROUSEL:
                     _show_saveable_image(
                         page_png, key=f"carousel_{page_number}", caption=f"ページ {page_number}"
                     )
-
-        # 選択中ページの文章の編集欄。文字はそのまま入力・削除でき、寄せは行ごと、
-        # 文字サイズは選択した文字に適用される。keyをページごとに分けているので、
-        # 別のページを選ぶとそのページの内容で編集欄が作り直される。
-        # 編集内容は、次の再実行の冒頭（このブロックの上の方）でcarousel_storeへ
-        # 反映している。
-        st.caption(
-            "文字はそのまま入力・削除できます。寄せは行ごと、"
-            "文字サイズは選択した文字に適用されます。"
-        )
-        rich_editor(
-            page_docs.get(selected_id, []),
-            rev=st.session_state.carousel_doc_rev,
-            base_size=carousel_font_size,
-            key=f"carousel_editor_{selected_id}",
-        )
 
 elif result and result["mode"] == MODE_NOTE:
     st.markdown('<div class="tt-step-title">note投稿用テキスト</div>', unsafe_allow_html=True)

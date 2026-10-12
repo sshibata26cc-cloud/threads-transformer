@@ -16,6 +16,7 @@ import os
 import re
 
 import streamlit as st
+import streamlit.components.v1 as components
 from PIL import ImageFont
 
 FONTS_DIR = os.path.join(os.path.dirname(__file__), "fonts")
@@ -120,3 +121,35 @@ def get_font(font_key: str, size: int, sample_text: str = "") -> ImageFont.FreeT
     filename = FONT_FILES.get(resolved_key, FONT_FILES[DEFAULT_FONT_KEY])
     path = os.path.join(FONTS_DIR, filename)
     return _load_font_file(path, size)
+
+
+# --------------------------------------------------------------------
+# ブラウザ側（プレビュー上の編集）で同じフォントを使うための配信
+# --------------------------------------------------------------------
+# プレビュー上で文章を直接編集するとき、ブラウザは画像と同じフォントで
+# 文字を表示・折り返しする必要がある。fonts/ディレクトリをStreamlitの
+# コンポーネント用ファイルとして登録しておくと、同梱フォントが
+# 「/component/<このコンポーネント名>/<ファイル名>」で配信される
+# （画面には何も描画しない。ファイルを配信させるためだけの登録）。
+_font_files_component = components.declare_component("tt_fonts", path=FONTS_DIR)
+
+# "Arial"で日本語を含む文章のときに使う、日本語対応フォントのキー。
+JAPANESE_FALLBACK_KEY = _JAPANESE_FALLBACK_KEY
+
+
+def browser_font(font_key: str) -> dict:
+    """
+    ブラウザで読み込むための、フォントのCSS上の名前とURLを返す。
+    URLは編集用コンポーネント（page_editor_component）のiframeから見た相対URL。
+    """
+    key = font_key if font_key in FONT_FILES else DEFAULT_FONT_KEY
+    filename = FONT_FILES[key]
+    return {
+        "name": "tt-" + os.path.splitext(filename)[0],
+        "url": f"../{_font_files_component.name}/{filename}",
+    }
+
+
+def browser_fallback_font(font_key: str):
+    """"Arial"のときだけ、日本語を含むページで使う代替フォントを返す（それ以外はNone）。"""
+    return browser_font(JAPANESE_FALLBACK_KEY) if font_key == "Arial" else None

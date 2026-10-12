@@ -7,7 +7,7 @@
     改ページ: {"pb": True}   （ストーリーズのみ）
 
 "s" がNoneの部分は、画面の「文字サイズ」で指定した標準サイズで描画する。
-編集はブラウザ側の編集欄（rich_editor.py）で行い、このモジュールは
+編集はブラウザ側の編集画面（page_editor.py）で行い、このモジュールは
 文書の整形と、Pillowでの描画（文字だけの透明レイヤー）を受け持つ。
 """
 
@@ -48,9 +48,12 @@ class RichTextError(Exception):
 # --------------------------------------------------------------------
 def text_to_doc(text: str):
     """プレーンテキストを、書式なし・左寄せの文書へ変換する（1行＝1段落）。"""
+    # 編集画面（ブラウザ）で読み取ったときと同じ形になるよう、改行以外の
+    # 特殊な空白（ノーブレークスペース・ゼロ幅スペース・CR）は先に整えておく。
+    text = (text or "").replace("\r", "").replace("\u00a0", " ").replace("\u200b", "")
     return [
         {"align": "left", "runs": [{"t": line, "s": None}] if line else []}
-        for line in (text or "").split("\n")
+        for line in text.split("\n")
     ]
 
 
@@ -312,3 +315,111 @@ def render_rich_text_layer(
             x += draw.textlength(text, font=font)
 
     return layer, warning
+
+
+# --------------------------------------------------------------------
+# ブラウザで決めた配置どおりに描く
+# --------------------------------------------------------------------
+# プレビュー上の編集（page_editor.py）では、ブラウザが同じフォントで文字を
+# 折り返し・配置し、その結果（行ごとのベースラインと、1文字ごとのx座標）を
+# 返してくる。画像は、その配置どおりにここで描くことで、編集中の見た目と
+# 完成画像を一致させる。
+#
+# 配置（lines）は、上から順に並べた行のリスト。
+#     {"y": ベースラインのy, "x0": 行の左端, "x1": 行の右端,
+#      "g": [[x, 文字, 文字サイズ], ...]}     （座標・サイズはキャンバスのpx）
+_MAX_LINES = 400
+_MAX_GLYPHS_PER_LINE = 400
+
+
+def _number(value, low, high):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value != value or not low <= value <= high:  # NaN・範囲外
+        return None
+    return float(value)
+
+
+def normalize_lines(raw, canvas_size):
+    """
+    ブラウザから受け取った配置を、決まった形に整える。
+    形が想定と違うもの・キャンバスから大きく外れたものは捨てる。
+    使える行が1つも取り出せない入力（リストでない等）の場合はNoneを返す。
+    """
+    if not isinstance(raw, list):
+        return None
+    canvas_w, canvas_h = canvas_size
+    lines = []
+    for item in raw[:_MAX_LINES]:
+        if not isinstance(item, dict) or not isinstance(item.get("g"), list):
+            continue
+        y = _number(item.get("y"), -500, canvas_h + 500)
+        if y is None:
+            continue
+        glyphs = []
+        for glyph in item["g"][:_MAX_GLYPHS_PER_LINE]:
+            if not isinstance(glyph, (list, tuple)) or len(glyph) != 3:
+                continue
+            x = _number(glyph[0], -500, canvas_w + 500)
+            size = _number(glyph[2], 4, 600)
+            text = glyph[1]
+            if x is None or size is None or not isinstance(text, str) or not 0 < len(text) <= 16:
+                continue
+            glyphs.append((x, text, max(1, round(size))))
+        if not glyphs:
+            continue
+        x0 = _number(item.get("x0"), -500, canvas_w + 500)
+        x1 = _number(item.get("x1"), -500, canvas_w + 500)
+        lines.append(
+            {
+                "y": y,
+                "x0": glyphs[0][0] if x0 is None else x0,
+                "x1": glyphs[-1][0] if x1 is None else x1,
+                "g": glyphs,
+            }
+        )
+    return lines
+
+
+def render_lines_layer(lines, canvas_size, text_color, text_bg_color=None, font_key=DEFAULT_FONT_KEY):
+    """
+    normalize_lines()済みの配置どおりに文字（と文字の背景の帯）を描いた、
+    canvas_sizeの透明なRGBA画像を返す。折り返し・寄せ・自動縮小はブラウザ側で
+    済んでいるので、ここでは一切行わない。
+
+    font_keyは実際に使うフォント（"Arial"で日本語を含むページの代替フォントへの
+    切り替えは、呼び出し側で済ませておく）。
+    """
+    layer = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    text_rgb = _hex_to_rgb(text_color)
+    text_bg_rgb = _hex_to_rgb(text_bg_color) if text_bg_color else None
+
+    def font_for(size):
+        try:
+            return get_font(font_key, size)
+        except OSError as e:
+            raise RichTextError("画像生成用のフォントファイルを読み込めませんでした。", detail=str(e))
+
+    if text_bg_rgb is not None:
+        for line in lines:
+            size = max(glyph[2] for glyph in line["g"])
+            ascent, descent = font_for(size).getmetrics()
+            pad_x = max(4, round(size * TEXT_BG_PAD_X_RATIO))
+            pad_y = max(2, round(size * TEXT_BG_PAD_Y_RATIO))
+            draw.rounded_rectangle(
+                (
+                    line["x0"] - pad_x,
+                    line["y"] - ascent - pad_y,
+                    line["x1"] + pad_x,
+                    line["y"] + descent + pad_y,
+                ),
+                radius=max(2, round(size * TEXT_BG_RADIUS_RATIO)),
+                fill=text_bg_rgb,
+            )
+
+    for line in lines:
+        for x, text, size in line["g"]:
+            draw.text((x, line["y"]), text, font=font_for(size), fill=text_rgb, anchor="ls")
+
+    return layer
