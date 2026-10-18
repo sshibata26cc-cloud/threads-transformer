@@ -15,14 +15,16 @@ permissions:
 
 jobs:
   wake:
-    runs-on: ubuntu-latest
+    # ubuntu-latestは2026年10月からUbuntu 26へ切り替わる。Playwrightが必要とする
+    # システムライブラリの導入が新しいOSでは失敗することがあるため、版を固定しておく。
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       APP_URL: "https://threads-transformer.streamlit.app/"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
