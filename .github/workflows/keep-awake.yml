@@ -1,0 +1,43 @@
+# Streamlit Community Cloud上のアプリが休止しないよう、数時間おきにブラウザで開く。
+# 実際の処理は scripts/keep_awake.py。
+# 「Actions」タブの「Keep Streamlit app awake」→「Run workflow」で手動実行もできる。
+name: Keep Streamlit app awake
+
+on:
+  schedule:
+    # 4時間ごと（UTC。毎時0分は混み合うので17分にずらしている）。
+    # Community Cloudはおよそ12時間閲覧がないと休止するので、それより短い間隔にする。
+    - cron: "17 */4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      APP_URL: "https://threads-transformer.streamlit.app/"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Playwright
+        run: |
+          pip install playwright==1.47.0
+          python -m playwright install --with-deps chromium
+
+      - name: Open the app
+        run: python scripts/keep_awake.py
+
+      - name: Upload screenshot on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: keep-awake-failure
+          path: keep_awake_failure.png
+          if-no-files-found: ignore
